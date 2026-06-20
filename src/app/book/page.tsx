@@ -1,5 +1,5 @@
 'use client'
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 
 /* ─── Data ─────────────────────────────────────────────────────────────────── */
@@ -148,11 +148,32 @@ export default function BookPage() {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [state, setState] = useState<BookingState>({ role:'', challenges:[], date:'', time:'', name:'', email:'', phone:'' })
+  const [availableSlots, setAvailableSlots] = useState<{label: string; value: string}[]>([])
+  const [isLoadingSlots, setIsLoadingSlots] = useState(false)
 
   const set = useCallback((u: Partial<BookingState>) => setState(p => ({ ...p, ...u })), [])
   const toggleC = useCallback((c: string) => setState(p => ({
     ...p, challenges: p.challenges.includes(c) ? p.challenges.filter(x=>x!==c) : [...p.challenges, c]
   })), [])
+
+  useEffect(() => {
+    if (!state.date) {
+      setAvailableSlots([])
+      return
+    }
+    setIsLoadingSlots(true)
+    fetch(`/api/availability?date=${state.date}`)
+      .then(r => r.json())
+      .then(d => {
+        const slots = d.slots || []
+        setAvailableSlots(slots)
+        if (state.time && !slots.some((s: any) => s.value === state.time)) {
+          set({ time: '' })
+        }
+      })
+      .catch(console.error)
+      .finally(() => setIsLoadingSlots(false))
+  }, [state.date, state.time, set])
 
   const handleSubmit = async () => {
     setSubmitting(true); setError('')
@@ -351,25 +372,35 @@ export default function BookPage() {
                         </div>
                         {state.date ? (
                           <div className="time-panel scrollable" style={{ flex: 1, maxHeight: 220, display: 'flex', flexDirection: 'column', gap: 5, paddingRight: 4 }}>
-                            {[
-                              { label: 'Morning', slots: TIME_SLOTS.filter(s => parseInt(s.value) < 12) },
-                              { label: 'Afternoon', slots: TIME_SLOTS.filter(s => parseInt(s.value) >= 12 && parseInt(s.value) < 18) },
-                              { label: 'Evening', slots: TIME_SLOTS.filter(s => parseInt(s.value) >= 18) },
-                            ].map(({ label, slots }) => (
-                              <div key={label}>
-                                <div style={{ fontFamily: 'IBM Plex Sans', fontSize: 10, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--secondary)', marginBottom: 5, marginTop: 6 }}>{label}</div>
-                                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                                  {slots.map(s => (
-                                    <button key={s.value} className={`time-btn${state.time===s.value?' sel':''}`} onClick={() => set({ time: s.value })}>
-                                      <span style={{ fontFamily: 'Manrope', fontSize: 12, fontWeight: 700, color: state.time===s.value?'var(--primary)':'var(--on-surface)' }}>{s.label}</span>
-                                      {state.time===s.value
-                                        ? <span className="material-symbols-outlined" style={{ fontSize: 16, color: 'var(--primary)', fontVariationSettings: "'FILL' 1" }}>check_circle</span>
-                                        : <span style={{ fontSize: 10, color: 'var(--secondary)', fontFamily: 'IBM Plex Sans' }}>30 min</span>}
-                                    </button>
-                                  ))}
-                                </div>
+                            {isLoadingSlots ? (
+                              <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--secondary)', fontSize: 13, padding: 20 }}>
+                                Loading available slots...
                               </div>
-                            ))}
+                            ) : availableSlots.length === 0 ? (
+                              <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--error)', fontSize: 13, padding: 20, textAlign: 'center' }}>
+                                No slots available on this date.
+                              </div>
+                            ) : (
+                              [
+                                { label: 'Morning', slots: availableSlots.filter(s => parseInt(s.value) < 12) },
+                                { label: 'Afternoon', slots: availableSlots.filter(s => parseInt(s.value) >= 12 && parseInt(s.value) < 18) },
+                                { label: 'Evening', slots: availableSlots.filter(s => parseInt(s.value) >= 18) },
+                              ].filter(g => g.slots.length > 0).map(({ label, slots }) => (
+                                <div key={label}>
+                                  <div style={{ fontFamily: 'IBM Plex Sans', fontSize: 10, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--secondary)', marginBottom: 5, marginTop: 6 }}>{label}</div>
+                                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                                    {slots.map(s => (
+                                      <button key={s.value} className={`time-btn${state.time===s.value?' sel':''}`} onClick={() => set({ time: s.value })}>
+                                        <span style={{ fontFamily: 'Manrope', fontSize: 12, fontWeight: 700, color: state.time===s.value?'var(--primary)':'var(--on-surface)' }}>{s.label}</span>
+                                        {state.time===s.value
+                                          ? <span className="material-symbols-outlined" style={{ fontSize: 16, color: 'var(--primary)', fontVariationSettings: "'FILL' 1" }}>check_circle</span>
+                                          : <span style={{ fontSize: 10, color: 'var(--secondary)', fontFamily: 'IBM Plex Sans' }}>30 min</span>}
+                                      </button>
+                                    ))}
+                                  </div>
+                                </div>
+                              ))
+                            )}
                           </div>
                         ) : (
                           <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: 'var(--outline)', textAlign: 'center' }}>

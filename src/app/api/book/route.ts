@@ -39,7 +39,7 @@ export async function POST(req: NextRequest) {
   }
 
   // --- Confirm slot is still available ---
-  const slots = getSlotsForDate(date);
+  const slots = await getSlotsForDate(date);
   const slot  = slots.find((s) => s.value === time);
   if (!slot) {
     return NextResponse.json({ error: 'Selected time slot is no longer available. Please choose another.' }, { status: 409 });

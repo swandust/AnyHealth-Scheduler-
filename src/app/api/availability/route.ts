@@ -21,6 +21,6 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ slots: [] });
   }
 
-  const slots = getSlotsForDate(date);
+  const slots = await getSlotsForDate(date);
   return NextResponse.json({ slots });
 }

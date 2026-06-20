@@ -1,18 +1,7 @@
-/**
- * Availability logic for AnyHealth bookings.
- *
- * Config (from .env.local):
- *   AVAILABLE_DAYS   = "1,2,3,4,5,6"   (1=Mon … 6=Sat, 0=Sun)
- *
- * Fixed time blocks (Asia/Singapore, UTC+8):
- *   Morning   : 08:00 – 11:45  (slots: 08:00, 08:45, 09:30, 10:15, 11:00)
- *   Afternoon : 14:00 – 17:45  (slots: 14:00, 14:45, 15:30, 16:15, 17:00)
- *   Evening   : 21:00 – 23:59  (slots: 21:00, 21:45, 22:30, 23:15)
- *
- * Each slot is 45 minutes. Slots that would end AFTER the block window are excluded.
- */
+import { graphRequest } from './graphClient';
 
-const DURATION_MINUTES = 45;
+const DURATION_MINUTES = 30;
+const MAILBOX = process.env.CALENDAR_USER_EMAIL!;
 
 // [startHour, startMinute, endHour (exclusive for new starts)]
 const BLOCKS: [number, number, number, number][] = [
@@ -25,7 +14,7 @@ export interface TimeSlot {
   label: string;      // "8:00 AM"
   value: string;      // "08:00"
   startIso: string;   // "2026-07-10T08:00:00"
-  endIso: string;     // "2026-07-10T08:45:00"
+  endIso: string;     // "2026-07-10T08:30:00"
 }
 
 function pad(n: number) {
@@ -38,7 +27,7 @@ function toLabel(h: number, m: number): string {
   return `${h12}:${pad(m)} ${ampm}`;
 }
 
-export function getSlotsForDate(dateStr: string): TimeSlot[] {
+export async function getSlotsForDate(dateStr: string): Promise<TimeSlot[]> {
   // dateStr: "YYYY-MM-DD" in SGT
   const availableDays = (process.env.AVAILABLE_DAYS ?? '1,2,3,4,5,6')
     .split(',')
@@ -92,20 +81,63 @@ export function getSlotsForDate(dateStr: string): TimeSlot[] {
     pad(nowSgt.getUTCDate()),
   ].join('-');
 
+  let futureSlots = slots;
   if (dateStr === todayStrSgt) {
     const nowH = nowSgt.getUTCHours();
     const nowM = nowSgt.getUTCMinutes();
-    return slots.filter(
+    futureSlots = slots.filter(
       (s) => {
         const [slotH, slotM] = s.value.split(':').map(Number);
         return slotH > nowH || (slotH === nowH && slotM > nowM);
       }
     );
+  } else if (dateStr < todayStrSgt) {
+    return [];
   }
 
-  return slots;
+  // If no slots left in the future, return early
+  if (futureSlots.length === 0) return [];
+
+  // --- Fetch Outlook Calendar Events to filter out Busy slots ---
+  try {
+    // SGT is UTC+8
+    const startUtc = new Date(Date.UTC(y, mo - 1, d, -8, 0, 0)).toISOString();
+    const endUtc = new Date(Date.UTC(y, mo - 1, d, 16, 0, 0)).toISOString(); // 24-8 = 16 (next midnight UTC)
+
+    // Using calendarView which automatically handles recurring events
+    const query = `?startDateTime=${startUtc}&endDateTime=${endUtc}&$select=start,end,showAs`;
+    const res = await graphRequest<any>('GET', `/users/${MAILBOX}/calendarView${query}`);
+    
+    if (res && res.value) {
+      const busyEvents = res.value.filter((ev: any) => 
+        ev.showAs === 'busy' || ev.showAs === 'tentative' || ev.showAs === 'oof'
+      );
+
+      // Filter futureSlots against busyEvents
+      futureSlots = futureSlots.filter((slot) => {
+        const slotStart = new Date(slot.startIso + '+08:00').getTime();
+        const slotEnd = new Date(slot.endIso + '+08:00').getTime();
+
+        const isOverlapping = busyEvents.some((ev: any) => {
+          const evStart = new Date(ev.start.dateTime + 'Z').getTime();
+          const evEnd = new Date(ev.end.dateTime + 'Z').getTime();
+          // overlap condition: SlotStart < EvEnd AND SlotEnd > EvStart
+          return slotStart < evEnd && slotEnd > evStart;
+        });
+
+        return !isOverlapping; // keep slot if NO overlap
+      });
+    }
+  } catch (err) {
+    console.error('Failed to fetch calendar for availability:', err);
+    // If it fails, we fall back to showing all future slots to not block bookings,
+    // though realistically we'd want to handle this better in a production app.
+  }
+
+  return futureSlots;
 }
 
-export function isDateAvailable(dateStr: string): boolean {
-  return getSlotsForDate(dateStr).length > 0;
+export async function isDateAvailable(dateStr: string): Promise<boolean> {
+  const slots = await getSlotsForDate(dateStr);
+  return slots.length > 0;
 }
