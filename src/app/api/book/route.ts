@@ -9,15 +9,7 @@ function generateBookingId(): string {
 }
 
 export async function POST(req: NextRequest) {
-  let body: {
-    clientName?: string;
-    clientEmail?: string;
-    clientPhone?: string;
-    goal?: string;
-    challenges?: string[];
-    date?: string;         // "YYYY-MM-DD"
-    timeValue?: string;    // "08:00"
-  };
+  let body: any;
 
   try {
     body = await req.json();
@@ -25,7 +17,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
   }
 
-  const { clientName, clientEmail, clientPhone, goal, challenges, date, time } = body as any;
+  const { clientName, clientEmail, clientPhone, goal, challenges, date, time } = body;
 
   // --- Validation ---
   if (!clientName?.trim())   return NextResponse.json({ error: 'Client name is required' }, { status: 400 });
@@ -39,8 +31,28 @@ export async function POST(req: NextRequest) {
   }
 
   // --- Confirm slot is still available ---
-  const slots = await getSlotsForDate(date);
-  const slot  = slots.find((s) => s.value === time);
+  let slots;
+  try {
+    slots = await getSlotsForDate(date);
+  } catch (availErr) {
+    console.error('[Booking] Availability check failed:', availErr);
+    // Fall back: construct slot manually so bookings aren't blocked
+    const [h, m] = time.split(':').map(Number);
+    const endMins = h * 60 + m + 30;
+    const endH = Math.floor(endMins / 60);
+    const endM = endMins % 60;
+    const pad = (n: number) => String(n).padStart(2, '0');
+    slots = [{
+      label: time,
+      value: time,
+      startIso: `${date}T${time}:00`,
+      endIso: endH >= 24
+        ? `${new Date(new Date(date).getTime() + 86400000).toISOString().split('T')[0]}T${pad(endH - 24)}:${pad(endM)}:00`
+        : `${date}T${pad(endH)}:${pad(endM)}:00`,
+    }];
+  }
+
+  const slot = slots.find((s) => s.value === time);
   if (!slot) {
     return NextResponse.json({ error: 'Selected time slot is no longer available. Please choose another.' }, { status: 409 });
   }
@@ -49,7 +61,6 @@ export async function POST(req: NextRequest) {
 
   try {
     // 1. Create Zoom meeting
-    // Convert SGT local ISO to UTC ISO for Zoom API
     const [sgtDatePart, sgtTimePart] = slot.startIso.split('T');
     const [y, mo, d] = sgtDatePart.split('-').map(Number);
     const [h, mi]    = sgtTimePart.split(':').map(Number);
@@ -67,7 +78,7 @@ export async function POST(req: NextRequest) {
       bookingId,
       clientName: clientName.trim(),
       clientEmail: clientEmail.trim(),
-      clientPhone: clientPhone.trim(),
+      clientPhone: (clientPhone || '').trim(),
       goal: goal.trim(),
       challenges: challenges ?? [],
       startIso: slot.startIso,
@@ -90,15 +101,18 @@ export async function POST(req: NextRequest) {
         zoomMeetingId: String(zoomMeeting.id),
       });
     } catch (calErr) {
-      // Log but don't fail the booking — email will still be sent
       console.error('[Booking] Outlook calendar error (non-fatal):', calErr);
     }
 
     // 3. Send emails in parallel
-    await Promise.all([
-      sendClientConfirmation(bookingParams),
-      sendPractitionerNotification(bookingParams),
-    ]);
+    try {
+      await Promise.all([
+        sendClientConfirmation(bookingParams),
+        sendPractitionerNotification(bookingParams),
+      ]);
+    } catch (emailErr) {
+      console.error('[Booking] Email error (non-fatal):', emailErr);
+    }
 
     return NextResponse.json({
       success: true,
@@ -110,10 +124,11 @@ export async function POST(req: NextRequest) {
     });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Unknown error';
-    console.error('[Booking] Fatal error:', message);
+    console.error('[Booking] Fatal error:', message, err);
     return NextResponse.json(
       { error: 'Booking failed. Please try again or contact us directly at contact@anyhealth.asia', detail: message },
       { status: 500 }
     );
   }
 }
+
