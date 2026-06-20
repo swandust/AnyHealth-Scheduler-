@@ -58,7 +58,15 @@ export async function getSlotsForDate(dateStr: string): Promise<TimeSlot[]> {
       if (endH > bEndH || (endH === bEndH && endM > bEndM)) break;
 
       const startIso = `${dateStr}T${pad(curH)}:${pad(curM)}:00`;
-      const endIso   = `${dateStr}T${pad(endH)}:${pad(endM)}:00`;
+      // Handle midnight overflow (e.g., 23:30 + 30min = 24:00 → next day T00:00)
+      let endIso: string;
+      if (endH >= 24) {
+        const nextDay = new Date(Date.UTC(y, mo - 1, d + 1));
+        const ndStr = `${nextDay.getUTCFullYear()}-${pad(nextDay.getUTCMonth() + 1)}-${pad(nextDay.getUTCDate())}`;
+        endIso = `${ndStr}T${pad(endH - 24)}:${pad(endM)}:00`;
+      } else {
+        endIso = `${dateStr}T${pad(endH)}:${pad(endM)}:00`;
+      }
 
       slots.push({
         label: toLabel(curH, curM),
