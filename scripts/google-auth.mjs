@@ -19,8 +19,9 @@ const PORT = Number(process.env.OAUTH_PORT ?? 5555);
 const REDIRECT_URI = `http://localhost:${PORT}/oauth2callback`;
 
 const SCOPES = [
-  'https://www.googleapis.com/auth/calendar.events',  // create the event + Meet link
+  'https://www.googleapis.com/auth/calendar.events',   // create the event + Meet link
   'https://www.googleapis.com/auth/calendar.readonly', // free/busy lookup
+  'https://www.googleapis.com/auth/gmail.send',        // send the confirmation emails
 ];
 
 /* ─── Read credentials from .env.local, .env, or the environment ─────────── */
@@ -46,8 +47,10 @@ if (!CLIENT_ID || !CLIENT_SECRET) {
 Missing GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET.
 
 Create them first:
-  1. console.cloud.google.com  →  APIs & Services  →  Credentials
-  2. Create Credentials  →  OAuth client ID  →  Web application
+  1. console.cloud.google.com  →  APIs & Services  →  Library
+     Enable BOTH "Google Calendar API" and "Gmail API".
+  2. APIs & Services  →  Credentials  →  Create Credentials  →  OAuth client ID
+     →  Web application
   3. Add this Authorised redirect URI:  ${REDIRECT_URI}
   4. Put the client ID and secret in .env.local, then run this again.
 `);

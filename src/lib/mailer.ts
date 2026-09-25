@@ -1,41 +1,59 @@
 import nodemailer, { type Transporter } from 'nodemailer';
+import { getGmailProfile, isGmailConfigured, sendViaGmail } from './gmailSender';
 
 /**
- * Outbound mail via Zoho.
+ * Outbound mail, over one of two transports.
  *
- * Replaces Microsoft Graph `sendMail`. Everything is env-driven rather than
- * hard-coded to smtp.zoho.com, because Zoho has several endpoints you may end
- * up on and switching between them must not need a code change:
+ *   gmail  (default)  Gmail API, using the same Google refresh token that
+ *                     creates the calendar event. No mail password at all.
+ *   smtp              Any SMTP server — Zoho Mail, ZeptoMail, anything else.
+ *                     Kept as a fallback for when the From address cannot be
+ *                     sent as from the Google account.
  *
- *   smtp.zoho.com        — Zoho Mail, global DC     (also .eu / .in / .com.au / .sa)
- *   smtp.zeptomail.com   — ZeptoMail, Zoho's transactional service
- *
- * If you are on the Zoho "Forever Free" plan, SMTP is not included — either
- * move to Mail Lite or point these vars at ZeptoMail. See SETUP.md, Step 3.
+ * Set MAIL_TRANSPORT to force one. Left unset, Gmail is used when Google is
+ * configured, otherwise SMTP.
  */
 
-const HOST = process.env.ZOHO_SMTP_HOST ?? 'smtp.zoho.com';
-const PORT = Number(process.env.ZOHO_SMTP_PORT ?? 465);
-const SECURE = (process.env.ZOHO_SMTP_SECURE ?? 'true') !== 'false';
+export type MailTransport = 'gmail' | 'smtp' | 'none';
+
+const HOST = process.env.SMTP_HOST ?? process.env.ZOHO_SMTP_HOST ?? 'smtp.zoho.com';
+const PORT = Number(process.env.SMTP_PORT ?? process.env.ZOHO_SMTP_PORT ?? 465);
+const SECURE = (process.env.SMTP_SECURE ?? process.env.ZOHO_SMTP_SECURE ?? 'true') !== 'false';
+const SMTP_USER = process.env.SMTP_USER ?? process.env.ZOHO_SMTP_USER;
+const SMTP_PASSWORD = process.env.SMTP_PASSWORD ?? process.env.ZOHO_SMTP_PASSWORD;
 
 export const FROM_EMAIL = process.env.FROM_EMAIL ?? 'contact@anyhealth.asia';
 export const FROM_NAME = process.env.FROM_NAME ?? 'AnyHealth';
 export const NOTIFY_EMAIL = process.env.NOTIFY_EMAIL ?? FROM_EMAIL;
 export const REPLY_TO = process.env.REPLY_TO_EMAIL ?? FROM_EMAIL;
 
-let _transport: Transporter | null | undefined;
-
-export function isMailerConfigured(): boolean {
-  return Boolean(process.env.ZOHO_SMTP_USER && process.env.ZOHO_SMTP_PASSWORD);
+export function isSmtpConfigured(): boolean {
+  return Boolean(SMTP_USER && SMTP_PASSWORD);
 }
 
-function getTransport(): Transporter | null {
+export function isMailerConfigured(): boolean {
+  return activeTransport() !== 'none';
+}
+
+export function activeTransport(): MailTransport {
+  const forced = process.env.MAIL_TRANSPORT?.toLowerCase();
+
+  if (forced === 'gmail') return isGmailConfigured() ? 'gmail' : 'none';
+  if (forced === 'smtp') return isSmtpConfigured() ? 'smtp' : 'none';
+
+  if (isGmailConfigured()) return 'gmail';
+  if (isSmtpConfigured()) return 'smtp';
+  return 'none';
+}
+
+/* ─── SMTP transport (fallback) ──────────────────────────────────────────── */
+
+let _transport: Transporter | null | undefined;
+
+function getSmtpTransport(): Transporter | null {
   if (_transport !== undefined) return _transport;
 
-  if (!isMailerConfigured()) {
-    console.error(
-      '[mailer] ZOHO_SMTP_USER / ZOHO_SMTP_PASSWORD are not set — no email will be sent.'
-    );
+  if (!isSmtpConfigured()) {
     _transport = null;
     return null;
   }
@@ -43,14 +61,10 @@ function getTransport(): Transporter | null {
   _transport = nodemailer.createTransport({
     host: HOST,
     port: PORT,
-    secure: SECURE,            // true for 465, false for 587 (STARTTLS)
+    secure: SECURE,        // true for 465, false for 587 (STARTTLS)
     requireTLS: !SECURE,
-    auth: {
-      user: process.env.ZOHO_SMTP_USER,
-      pass: process.env.ZOHO_SMTP_PASSWORD,
-    },
-    // Serverless functions are short-lived; don't hold the socket open.
-    pool: false,
+    auth: { user: SMTP_USER, pass: SMTP_PASSWORD },
+    pool: false,           // serverless functions are short-lived
     connectionTimeout: 15_000,
     greetingTimeout: 10_000,
     socketTimeout: 20_000,
@@ -58,6 +72,8 @@ function getTransport(): Transporter | null {
 
   return _transport;
 }
+
+/* ─── Public API ─────────────────────────────────────────────────────────── */
 
 export interface MailAttachment {
   filename: string;
@@ -81,6 +97,7 @@ export interface MailResult {
   ok: boolean;
   messageId?: string;
   error?: string;
+  transport?: MailTransport;
 }
 
 /**
@@ -89,56 +106,112 @@ export interface MailResult {
  * silently swallowed the way it was before.
  */
 export async function sendMail(input: MailInput): Promise<MailResult> {
-  const transport = getTransport();
-  if (!transport) return { ok: false, error: 'SMTP not configured' };
+  const transport = activeTransport();
+
+  if (transport === 'none') {
+    console.error(
+      '[mailer] No mail transport configured — set up Google (preferred) or SMTP. ' +
+        'No email was sent.'
+    );
+    return { ok: false, error: 'No mail transport configured', transport };
+  }
+
+  const icsContentType = `text/calendar; charset=utf-8; method=${input.icsMethod ?? 'REQUEST'}`;
 
   const attachments: MailAttachment[] = [...(input.attachments ?? [])];
   if (input.icsContent) {
     attachments.push({
       filename: 'anyhealth-appointment.ics',
       content: input.icsContent,
-      contentType: `text/calendar; charset=utf-8; method=${input.icsMethod ?? 'REQUEST'}`,
+      contentType: icsContentType,
     });
   }
 
-  try {
-    const info = await transport.sendMail({
-      from: { name: FROM_NAME, address: FROM_EMAIL },
-      to: input.to,
-      replyTo: input.replyTo ?? REPLY_TO,
-      subject: input.subject,
-      html: input.html,
-      text: input.text ?? htmlToText(input.html),
-      attachments,
-      // Makes Gmail/Outlook show the invite inline rather than as a file only.
-      alternatives: input.icsContent
-        ? [
-            {
-              contentType: `text/calendar; charset=utf-8; method=${input.icsMethod ?? 'REQUEST'}`,
-              content: input.icsContent,
-            },
-          ]
-        : undefined,
-    });
+  // Showing the invite inline (rather than only as a file) is what makes Gmail
+  // and Outlook render RSVP buttons.
+  const alternatives = input.icsContent
+    ? [{ contentType: icsContentType, content: input.icsContent }]
+    : undefined;
 
-    return { ok: true, messageId: info.messageId };
+  const common = {
+    from: { name: FROM_NAME, address: FROM_EMAIL },
+    to: input.to,
+    replyTo: input.replyTo ?? REPLY_TO,
+    subject: input.subject,
+    html: input.html,
+    text: input.text ?? htmlToText(input.html),
+    attachments,
+    alternatives,
+  };
+
+  if (transport === 'gmail') {
+    const result = await sendViaGmail(common);
+    if (!result.ok) console.error('[mailer] Gmail send failed:', result.error);
+    return { ...result, transport };
+  }
+
+  const smtp = getSmtpTransport();
+  if (!smtp) return { ok: false, error: 'SMTP not configured', transport: 'none' };
+
+  try {
+    const info = await smtp.sendMail(common);
+    return { ok: true, messageId: info.messageId, transport };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error('[mailer] send failed:', message);
-    return { ok: false, error: message };
+    console.error('[mailer] SMTP send failed:', message);
+    return { ok: false, error: message, transport };
   }
 }
 
-/** Used by /api/admin/health to prove the SMTP credentials still work. */
+/** Used by /api/admin/health to prove mail still works before a customer finds out. */
 export async function verifyMailer(): Promise<MailResult> {
-  const transport = getTransport();
-  if (!transport) return { ok: false, error: 'SMTP not configured' };
+  const transport = activeTransport();
+
+  if (transport === 'none') {
+    return { ok: false, error: 'No mail transport configured', transport };
+  }
+
+  if (transport === 'gmail') {
+    const profile = await getGmailProfile();
+
+    // gmail.send alone cannot read the profile; that is not a failure, it just
+    // means we cannot name the mailbox. A bad token would have failed earlier,
+    // inside getGoogleAccessToken.
+    if (!profile.ok) {
+      return {
+        ok: true,
+        transport,
+        error: `Gmail reachable; mailbox not readable with the gmail.send scope (${profile.error})`,
+      };
+    }
+
+    const mismatch =
+      profile.emailAddress &&
+      profile.emailAddress.toLowerCase() !== FROM_EMAIL.toLowerCase();
+
+    return {
+      ok: true,
+      transport,
+      error: mismatch
+        ? `Sending as ${profile.emailAddress}; FROM_EMAIL is ${FROM_EMAIL}. ` +
+          `Gmail will rewrite the From header unless ${FROM_EMAIL} is a verified ` +
+          `"Send mail as" alias on that account.`
+        : undefined,
+    };
+  }
+
+  const smtp = getSmtpTransport();
+  if (!smtp) return { ok: false, error: 'SMTP not configured', transport: 'none' };
 
   try {
-    await transport.verify();
-    return { ok: true };
+    await smtp.verify();
+    return { ok: true, transport };
   } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+      transport,
+    };
   }
 }
 

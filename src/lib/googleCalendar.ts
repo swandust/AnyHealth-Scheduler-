@@ -1,3 +1,5 @@
+import { getGoogleAccessToken, isGoogleConfigured } from './googleAuth';
+
 /**
  * Google Calendar + Google Meet integration.
  *
@@ -6,14 +8,12 @@
  * Meet link as part of creating that event — there is no second video API to
  * authenticate against.
  *
- * Auth: OAuth 2.0 refresh token belonging to the AnyHealth Google account.
- * Run `npm run google:auth` once to mint it (see SETUP.md, Step 2).
+ * Auth lives in ./googleAuth — the same refresh token also sends the mail.
  * A refresh token is used rather than a service account because service
  * accounts need Google Workspace domain-wide delegation, which is not
- * available on a plain Google account or when mail is hosted elsewhere.
+ * available on a plain Google account.
  */
 
-const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const CALENDAR_API = 'https://www.googleapis.com/calendar/v3';
 
 export const TIMEZONE = process.env.BOOKING_TIMEZONE ?? 'Asia/Singapore';
@@ -22,70 +22,7 @@ function calendarId(): string {
   return encodeURIComponent(process.env.GOOGLE_CALENDAR_ID ?? 'primary');
 }
 
-export function isGoogleConfigured(): boolean {
-  return Boolean(
-    process.env.GOOGLE_CLIENT_ID &&
-      process.env.GOOGLE_CLIENT_SECRET &&
-      process.env.GOOGLE_REFRESH_TOKEN
-  );
-}
-
-/* ─── Token handling ─────────────────────────────────────────────────────── */
-
-let _token: { value: string; expiresAt: number } | null = null;
-
-export async function getGoogleAccessToken(): Promise<string> {
-  // Re-use the cached token until 60s before it expires.
-  if (_token && Date.now() < _token.expiresAt - 60_000) return _token.value;
-
-  const clientId = process.env.GOOGLE_CLIENT_ID;
-  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
-  const refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
-
-  if (!clientId || !clientSecret || !refreshToken) {
-    throw new Error(
-      'Google is not configured: set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET and ' +
-        'GOOGLE_REFRESH_TOKEN (run `npm run google:auth`).'
-    );
-  }
-
-  const res = await fetch(TOKEN_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      client_id: clientId,
-      client_secret: clientSecret,
-      refresh_token: refreshToken,
-      grant_type: 'refresh_token',
-    }),
-  });
-
-  const data = (await res.json().catch(() => ({}))) as {
-    access_token?: string;
-    expires_in?: number;
-    error?: string;
-    error_description?: string;
-  };
-
-  if (!res.ok || !data.access_token) {
-    // invalid_grant almost always means the refresh token was revoked, or the
-    // OAuth consent screen is still in "Testing" mode (7-day token expiry).
-    throw new Error(
-      `Google OAuth refresh failed (${res.status} ${data.error ?? ''}): ` +
-        `${data.error_description ?? 'no access_token returned'}` +
-        (data.error === 'invalid_grant'
-          ? ' — re-run `npm run google:auth`, and make sure the OAuth consent ' +
-            'screen is set to "In production", not "Testing".'
-          : '')
-    );
-  }
-
-  _token = {
-    value: data.access_token,
-    expiresAt: Date.now() + (data.expires_in ?? 3600) * 1000,
-  };
-  return _token.value;
-}
+export { getGoogleAccessToken, isGoogleConfigured };
 
 async function googleRequest<T>(
   method: 'GET' | 'POST' | 'DELETE' | 'PATCH',
@@ -146,7 +83,7 @@ export async function createMeetEvent(params: {
   /** Local wall-clock time, "YYYY-MM-DDTHH:MM:SS", in {@link TIMEZONE}. */
   startLocal: string;
   endLocal: string;
-  /** Let Google email the invite as well as our own Zoho confirmation. */
+  /** Let Google email the calendar invite as well as our own confirmation. */
   sendUpdates?: 'all' | 'externalOnly' | 'none';
 }): Promise<MeetEvent> {
   const description = [

@@ -238,7 +238,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  /* ── 3. Emails via Zoho (never fatal — the meeting already exists) ────── */
+  /* ── 3. Confirmation emails (never fatal — the meeting already exists) ── */
   const emailParams: BookingEmailParams = {
     bookingRef,
     clientName,

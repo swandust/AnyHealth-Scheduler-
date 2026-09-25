@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { adminTokenConfigured, isAuthorised } from '@/lib/adminAuth';
-import { getGoogleAccessToken, isGoogleConfigured } from '@/lib/googleCalendar';
-import { isMailerConfigured, verifyMailer } from '@/lib/mailer';
+import { getGoogleAccessToken, getGrantedScopes, isGoogleConfigured } from '@/lib/googleAuth';
+import { activeTransport, verifyMailer } from '@/lib/mailer';
 import { getSupabase, isSupabaseConfigured } from '@/lib/supabase';
 
 /**
@@ -41,7 +41,21 @@ export async function GET(req: NextRequest) {
   } else {
     try {
       await getGoogleAccessToken();
-      checks.google = { configured: true, ok: true, detail: 'refresh token still valid' };
+      const scopes = await getGrantedScopes();
+      const missing = [
+        'https://www.googleapis.com/auth/calendar.events',
+        'https://www.googleapis.com/auth/gmail.send',
+      ].filter((s) => !scopes.includes(s));
+
+      checks.google = missing.length
+        ? {
+            configured: true,
+            ok: false,
+            detail:
+              `refresh token is valid but missing scope(s): ${missing.join(', ')} — ` +
+              're-run `npm run google:auth`',
+          }
+        : { configured: true, ok: true, detail: 'refresh token valid, all scopes granted' };
     } catch (err) {
       checks.google = {
         configured: true,
@@ -51,12 +65,23 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  // Zoho SMTP
-  if (!isMailerConfigured()) {
-    checks.zohoMail = { configured: false, ok: false, detail: 'ZOHO_SMTP_USER / ZOHO_SMTP_PASSWORD missing' };
+  // Mail — Gmail API or SMTP, whichever is active
+  const transport = activeTransport();
+  if (transport === 'none') {
+    checks.mail = {
+      configured: false,
+      ok: false,
+      detail: 'No transport: configure Google (preferred) or SMTP_USER / SMTP_PASSWORD',
+    };
   } else {
     const result = await verifyMailer();
-    checks.zohoMail = { configured: true, ok: result.ok, detail: result.error ?? 'SMTP login accepted' };
+    checks.mail = {
+      configured: true,
+      ok: result.ok,
+      // A warning can ride along with ok:true — e.g. a From address that Gmail
+      // will rewrite. Surface it rather than hiding it behind a green tick.
+      detail: result.error ?? `${transport} transport ready`,
+    };
   }
 
   const allOk = Object.values(checks).every((c) => c.ok);

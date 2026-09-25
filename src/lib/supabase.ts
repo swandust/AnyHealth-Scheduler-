@@ -114,8 +114,8 @@ export class SlotTakenError extends Error {
 
 /**
  * Insert the booking BEFORE any external call is made. This is the single most
- * important line in the app: whatever Google or Zoho do next, the answers are
- * already safe.
+ * important line in the app: whatever the calendar and mail calls do next, the
+ * answers are already safe.
  *
  * Returns `null` (rather than throwing) when Supabase is unreachable, so a
  * database outage cannot stop a customer booking a call.
