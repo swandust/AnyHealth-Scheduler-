@@ -1,60 +1,53 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextResponse, type NextRequest } from 'next/server';
+import { buildIcs } from '@/lib/ics';
+import { FROM_EMAIL } from '@/lib/mailer';
+import { addMinutesLocal } from '@/lib/time';
+import { DURATION_MINUTES } from '@/lib/availability';
 
-function toUtcStamp(localIso: string): string {
-  const [datePart, timePart] = localIso.split('T');
-  const [y, mo, d] = datePart.split('-').map(Number);
-  const [h, mi]    = timePart.split(':').map(Number);
-  const utc = new Date(Date.UTC(y, mo - 1, d, h - 8, mi));
-  return utc.toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z';
-}
-
+/**
+ * "Add to calendar" link on the confirmation page.
+ * Kept so the client can re-add the event if they lose the emailed invite.
+ */
 export async function GET(req: NextRequest) {
-  const { searchParams } = new URL(req.url);
-  const name      = searchParams.get('name') ?? 'Client';
-  const email     = searchParams.get('email') ?? '';
-  const startIso  = searchParams.get('start') ?? '';
-  const endIso    = searchParams.get('end') ?? '';
-  const zoomUrl   = searchParams.get('zoom') ?? '';
-  const zoomId    = searchParams.get('meetingId') ?? '';
-  const zoomPwd   = searchParams.get('password') ?? '';
-  const uid       = searchParams.get('uid') ?? `anyhealth-${Date.now()}@anyhealth.asia`;
+  const q = req.nextUrl.searchParams;
 
-  if (!startIso || !endIso) {
-    return NextResponse.json({ error: 'Missing start or end' }, { status: 400 });
+  const name = q.get('name') ?? 'Client';
+  const email = q.get('email') ?? '';
+  const startLocal = q.get('start') ?? '';
+  const meetUrl = q.get('meet') ?? q.get('zoom') ?? ''; // ?zoom= kept for old links
+  const bookingRef = q.get('ref') ?? '';
+
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/.test(startLocal)) {
+    return NextResponse.json({ error: 'Missing or malformed start time' }, { status: 400 });
   }
 
-  const now = new Date().toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z';
+  const endLocal = q.get('end') ?? addMinutesLocal(startLocal, DURATION_MINUTES);
 
-  const ics = [
-    'BEGIN:VCALENDAR',
-    'VERSION:2.0',
-    'PRODID:-//AnyHealth//Booking//EN',
-    'CALSCALE:GREGORIAN',
-    'METHOD:REQUEST',
-    'BEGIN:VEVENT',
-    `UID:${uid}`,
-    `DTSTAMP:${now}`,
-    `DTSTART:${toUtcStamp(startIso)}`,
-    `DTEND:${toUtcStamp(endIso)}`,
-    'SUMMARY:AnyHealth – Initial Consultation',
-    `DESCRIPTION:Join Zoom: ${zoomUrl}\\nMeeting ID: ${zoomId}\\nPasscode: ${zoomPwd}`,
-    `LOCATION:${zoomUrl}`,
-    `ORGANIZER;CN=AnyHealth:mailto:contact@anyhealth.asia`,
-    email ? `ATTENDEE;CN=${name};ROLE=REQ-PARTICIPANT;RSVP=TRUE:mailto:${email}` : '',
-    'STATUS:CONFIRMED',
-    'BEGIN:VALARM',
-    'TRIGGER:-PT30M',
-    'ACTION:DISPLAY',
-    'DESCRIPTION:AnyHealth appointment in 30 minutes',
-    'END:VALARM',
-    'END:VEVENT',
-    'END:VCALENDAR',
-  ].filter(Boolean).join('\r\n');
+  const ics = buildIcs({
+    uid: bookingRef
+      ? `anyhealth-${bookingRef}@anyhealth.asia`
+      : `anyhealth-${Date.now()}@anyhealth.asia`,
+    summary: 'AnyHealth – Initial Consultation',
+    description: [
+      'Your AnyHealth consultation.',
+      meetUrl ? `\nJoin on Google Meet: ${meetUrl}` : '',
+      bookingRef ? `\nBooking ref: ${bookingRef}` : '',
+    ].join(''),
+    location: meetUrl || 'Google Meet',
+    url: meetUrl || undefined,
+    startLocal,
+    endLocal,
+    organizerEmail: FROM_EMAIL,
+    organizerName: 'AnyHealth',
+    attendeeEmail: email || undefined,
+    attendeeName: name,
+  });
 
   return new NextResponse(ics, {
     headers: {
       'Content-Type': 'text/calendar; charset=utf-8',
       'Content-Disposition': 'attachment; filename="anyhealth-appointment.ics"',
+      'Cache-Control': 'no-store',
     },
   });
 }

@@ -8,14 +8,16 @@ function ConfirmedContent() {
   const name = params.get('name') || 'there'
   const date = params.get('date') || ''
   const time = params.get('time') || ''
-  const zoomUrl = params.get('zoomUrl') || '#'
+  const meetUrl = params.get('meetUrl') || ''
+  const bookingRef = params.get('ref') || ''
+  const startIso = params.get('start') || (date && time ? `${date}T${time}:00` : '')
 
-  const TIME_SLOTS: Record<string, string> = {
-    '08:00': '8:00 AM', '08:45': '8:45 AM', '09:30': '9:30 AM',
-    '10:15': '10:15 AM', '11:00': '11:00 AM', '14:00': '2:00 PM',
-    '14:45': '2:45 PM', '15:30': '3:30 PM', '16:15': '4:15 PM',
-    '17:00': '5:00 PM', '21:00': '9:00 PM', '21:45': '9:45 PM',
-    '22:30': '10:30 PM', '23:15': '11:15 PM',
+  // Derived from the value rather than a lookup table, so changing the slot
+  // schedule on the server never leaves this page showing a raw "14:30".
+  const fmtTime = (v: string) => {
+    const [h, m] = v.split(':').map(Number)
+    if (Number.isNaN(h) || Number.isNaN(m)) return v
+    return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${h < 12 ? 'AM' : 'PM'}`
   }
 
   const friendlyDate = date
@@ -83,9 +85,9 @@ function ConfirmedContent() {
               }}>
                 {[
                   { icon: 'calendar_today', label: 'Date', value: friendlyDate },
-                  { icon: 'schedule', label: 'Time', value: TIME_SLOTS[time] || time },
+                  { icon: 'schedule', label: 'Time', value: fmtTime(time) },
                   { icon: 'timer', label: 'Duration', value: '30 minutes' },
-                  { icon: 'videocam', label: 'Format', value: 'Zoom Video Call' },
+                  { icon: 'videocam', label: 'Format', value: 'Google Meet video call' },
                 ].map(row => (
                   <div key={row.label} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 0', borderBottom: '1px solid var(--outline-variant)' }}>
                     <span className="material-symbols-outlined" style={{ color: 'var(--primary)', fontSize: 20 }}>{row.icon}</span>
@@ -101,33 +103,29 @@ function ConfirmedContent() {
                 ))}
               </div>
 
-              {/* Zoom Join Button */}
-              {zoomUrl && zoomUrl !== '#' && (
-                <a href={zoomUrl} target="_blank" rel="noopener noreferrer"
+              {/* Google Meet join button */}
+              {meetUrl && (
+                <a href={meetUrl} target="_blank" rel="noopener noreferrer"
                   style={{ display: 'block', textDecoration: 'none', marginBottom: 12 }}>
                   <button style={{
                     width: '100%', padding: '16px 24px',
-                    background: '#0b5cad', color: 'white',
+                    background: 'var(--primary)', color: 'var(--on-primary)',
                     border: 'none', borderRadius: 12,
                     fontFamily: 'Manrope', fontSize: 16, fontWeight: 700,
                     cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
                     transition: 'transform 0.15s, box-shadow 0.15s',
                   }}
-                    onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = '0 8px 24px rgba(11,92,173,0.3)' }}
+                    onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = '0 8px 24px rgba(0,108,78,0.3)' }}
                     onMouseLeave={e => { e.currentTarget.style.transform = ''; e.currentTarget.style.boxShadow = '' }}
                   >
-                    <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-                      <circle cx="10" cy="10" r="10" fill="#2D8CFF" />
-                      <path d="M6 7.5C6 7.22386 6.22386 7 6.5 7H11.5C11.7761 7 12 7.22386 12 7.5V12.5C12 12.7761 11.7761 13 11.5 13H6.5C6.22386 13 6 12.7761 6 12.5V7.5Z" fill="white" />
-                      <path d="M12.5 9.25L14.5 8V12L12.5 10.75V9.25Z" fill="white" />
-                    </svg>
-                    Join Zoom Meeting
+                    <span className="material-symbols-outlined" style={{ fontSize: 20 }}>videocam</span>
+                    Join Google Meet
                   </button>
                 </a>
               )}
 
               {/* Add to Calendar */}
-              <a href={`/api/download-ics?name=${encodeURIComponent(name)}&date=${date}&time=${time}`}
+              <a href={`/api/download-ics?${new URLSearchParams({ name, start: startIso, meet: meetUrl, ref: bookingRef })}`}
                 style={{ display: 'block', textDecoration: 'none', marginBottom: 32 }}>
                 <button style={{
                   width: '100%', padding: '14px 24px',
@@ -158,9 +156,14 @@ function ConfirmedContent() {
                 ))}
               </div>
 
-              <p style={{ fontFamily: 'Manrope', fontSize: 13, color: 'var(--secondary)', marginBottom: 24 }}>
-                📧 A confirmation email has been sent to your email address.
+              <p style={{ fontFamily: 'Manrope', fontSize: 13, color: 'var(--secondary)', marginBottom: 8 }}>
+                📧 A confirmation email and a Google Calendar invite are on their way to you.
               </p>
+              {bookingRef && (
+                <p style={{ fontFamily: 'IBM Plex Sans', fontSize: 12, color: 'var(--on-surface-variant)', marginBottom: 24 }}>
+                  Booking reference <strong>{bookingRef}</strong>
+                </p>
+              )}
 
               <Link href="/" style={{ color: 'var(--primary)', fontFamily: 'Manrope', fontSize: 14, fontWeight: 600, textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
                 <span className="material-symbols-outlined" style={{ fontSize: 16 }}>home</span>

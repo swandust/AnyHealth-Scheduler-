@@ -1,151 +1,146 @@
-import { graphRequest } from './graphClient';
+import { getBusyIntervals, isGoogleConfigured } from './googleCalendar';
+import { getBookedSlotStarts } from './supabase';
+import {
+  TIMEZONE,
+  addMinutesLocal,
+  formatTimeLabel,
+  localToUtc,
+  toLocalParts,
+} from './time';
 
-const DURATION_MINUTES = 30;
-const MAILBOX = process.env.CALENDAR_USER_EMAIL!;
+export const DURATION_MINUTES = Number(process.env.SLOT_DURATION_MINUTES ?? 30);
 
-// [startHour, startMinute, endHour (exclusive for new starts)]
-const BLOCKS: [number, number, number, number][] = [
-  [8,  0, 12, 0],  // Morning   08:00 – before 12:00
-  [14, 0, 18, 0],  // Afternoon 14:00 – before 18:00
-  [21, 0, 24, 0],  // Evening   21:00 – before 24:00
+/** [startHour, startMinute, endHour, endMinute] — bookable windows, local time. */
+const BLOCKS: Array<[number, number, number, number]> = [
+  [8, 0, 12, 0],   // Morning    08:00 – 12:00
+  [14, 0, 18, 0],  // Afternoon  14:00 – 18:00
+  [21, 0, 24, 0],  // Evening    21:00 – 24:00
 ];
 
+/** Don't offer a slot that starts within this many minutes from now. */
+const MIN_NOTICE_MINUTES = Number(process.env.MIN_NOTICE_MINUTES ?? 60);
+
+const pad = (n: number) => String(n).padStart(2, '0');
+
 export interface TimeSlot {
-  label: string;      // "8:00 AM"
-  value: string;      // "08:00"
-  startIso: string;   // "2026-07-10T08:00:00"
-  endIso: string;     // "2026-07-10T08:30:00"
+  label: string;     // "8:00 AM"
+  value: string;     // "08:00"
+  startIso: string;  // "2026-07-10T08:00:00"  (local wall clock)
+  endIso: string;    // "2026-07-10T08:30:00"
 }
 
-function pad(n: number) {
-  return String(n).padStart(2, '0');
-}
-
-function toLabel(h: number, m: number): string {
-  const ampm = h < 12 ? 'AM' : 'PM';
-  const h12  = h % 12 || 12;
-  return `${h12}:${pad(m)} ${ampm}`;
-}
-
-export async function getSlotsForDate(dateStr: string): Promise<TimeSlot[]> {
-  // dateStr: "YYYY-MM-DD" in SGT
-  const availableDays = (process.env.AVAILABLE_DAYS ?? '1,2,3,4,5,6')
-    .split(',')
-    .map((d) => parseInt(d.trim(), 10));
-
-  // Determine day-of-week in SGT (UTC+8)
-  const [y, mo, d] = dateStr.split('-').map(Number);
-  const utcDate = new Date(Date.UTC(y, mo - 1, d, 0, 0, 0)); // midnight UTC
-  const sgtMs   = utcDate.getTime() + 8 * 60 * 60 * 1000;    // shift to SGT
-  const sgtDate = new Date(sgtMs);
-  const dow     = sgtDate.getUTCDay(); // 0=Sun 1=Mon … 6=Sat
-
-  if (!availableDays.includes(dow)) return [];
-
+/** Every slot the schedule could theoretically offer on that date. */
+function generateSlots(dateStr: string): TimeSlot[] {
   const slots: TimeSlot[] = [];
 
-  for (const [bStartH, bStartM, bEndH, bEndM] of BLOCKS) {
-    let curH = bStartH;
-    let curM = bStartM;
+  for (const [startH, startM, endH, endM] of BLOCKS) {
+    const blockEnd = endH * 60 + endM;
+    let cursor = startH * 60 + startM;
 
-    while (true) {
-      // Calculate end of this slot
-      const endTotalMins = curH * 60 + curM + DURATION_MINUTES;
-      const endH = Math.floor(endTotalMins / 60);
-      const endM = endTotalMins % 60;
-
-      // Stop if end exceeds block boundary
-      if (endH > bEndH || (endH === bEndH && endM > bEndM)) break;
-
-      const startIso = `${dateStr}T${pad(curH)}:${pad(curM)}:00`;
-      // Handle midnight overflow (e.g., 23:30 + 30min = 24:00 → next day T00:00)
-      let endIso: string;
-      if (endH >= 24) {
-        const nextDay = new Date(Date.UTC(y, mo - 1, d + 1));
-        const ndStr = `${nextDay.getUTCFullYear()}-${pad(nextDay.getUTCMonth() + 1)}-${pad(nextDay.getUTCDate())}`;
-        endIso = `${ndStr}T${pad(endH - 24)}:${pad(endM)}:00`;
-      } else {
-        endIso = `${dateStr}T${pad(endH)}:${pad(endM)}:00`;
-      }
+    while (cursor + DURATION_MINUTES <= blockEnd) {
+      const h = Math.floor(cursor / 60);
+      const m = cursor % 60;
+      const startIso = `${dateStr}T${pad(h)}:${pad(m)}:00`;
 
       slots.push({
-        label: toLabel(curH, curM),
-        value: `${pad(curH)}:${pad(curM)}`,
+        label: formatTimeLabel(h, m),
+        value: `${pad(h)}:${pad(m)}`,
         startIso,
-        endIso,
+        // addMinutesLocal rolls the date correctly for the 23:30 → 00:00 case.
+        endIso: addMinutesLocal(startIso, DURATION_MINUTES),
       });
 
-      // Next slot
-      curH = endH;
-      curM = endM;
+      cursor += DURATION_MINUTES;
     }
   }
 
-  // Filter out past slots (compare against current SGT time)
-  const nowSgt = new Date(Date.now() + 8 * 60 * 60 * 1000);
-  const todayStrSgt = [
-    nowSgt.getUTCFullYear(),
-    pad(nowSgt.getUTCMonth() + 1),
-    pad(nowSgt.getUTCDate()),
-  ].join('-');
+  return slots;
+}
 
-  let futureSlots = slots;
-  if (dateStr === todayStrSgt) {
-    const nowH = nowSgt.getUTCHours();
-    const nowM = nowSgt.getUTCMinutes();
-    futureSlots = slots.filter(
-      (s) => {
-        const [slotH, slotM] = s.value.split(':').map(Number);
-        return slotH > nowH || (slotH === nowH && slotM > nowM);
-      }
-    );
-  } else if (dateStr < todayStrSgt) {
-    return [];
-  }
+/**
+ * Bookable slots for a date, with everything already taken removed.
+ *
+ * Two independent sources are subtracted:
+ *   1. Google Calendar free/busy — so a manually-added meeting blocks the slot.
+ *   2. Supabase bookings — so a booking still mid-flight blocks the slot even
+ *      if Google has not caught up yet.
+ *
+ * If a source errors the slot list is NOT emptied; Supabase's unique index on
+ * `start_utc` is the real guard against double-booking, so degrading open is
+ * safe here and stops an outage at Google from killing the funnel.
+ */
+export async function getSlotsForDate(dateStr: string): Promise<TimeSlot[]> {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return [];
 
-  // If no slots left in the future, return early
-  if (futureSlots.length === 0) return [];
+  const availableDays = (process.env.AVAILABLE_DAYS ?? '1,2,3,4,5,6')
+    .split(',')
+    .map((d) => parseInt(d.trim(), 10))
+    .filter((d) => Number.isInteger(d));
 
-  // --- Fetch Outlook Calendar Events to filter out Busy slots ---
-  try {
-    // SGT is UTC+8
-    const startUtc = new Date(Date.UTC(y, mo - 1, d, -8, 0, 0)).toISOString();
-    const endUtc = new Date(Date.UTC(y, mo - 1, d, 16, 0, 0)).toISOString(); // 24-8 = 16 (next midnight UTC)
+  // Day of week for that date, in the booking timezone.
+  const dayStart = localToUtc(`${dateStr}T12:00:00`);
+  const { weekday } = toLocalParts(dayStart);
+  if (!availableDays.includes(weekday)) return [];
 
-    // Using calendarView which automatically handles recurring events
-    const query = `?startDateTime=${startUtc}&endDateTime=${endUtc}&$select=start,end,showAs`;
-    const res = await graphRequest<any>('GET', `/users/${MAILBOX}/calendarView${query}`);
-    
-    if (res && res.value) {
-      const busyEvents = res.value.filter((ev: any) => 
-        ev.showAs === 'busy' || ev.showAs === 'tentative' || ev.showAs === 'oof'
+  let slots = generateSlots(dateStr);
+  if (slots.length === 0) return [];
+
+  // --- 1. Drop anything in the past or inside the notice window -------------
+  const cutoff = Date.now() + MIN_NOTICE_MINUTES * 60_000;
+  slots = slots.filter((s) => localToUtc(s.startIso).getTime() >= cutoff);
+  if (slots.length === 0) return [];
+
+  // --- 2. Subtract Google Calendar busy time -------------------------------
+  const windowStart = localToUtc(`${dateStr}T00:00:00`);
+  const windowEnd = localToUtc(addMinutesLocal(`${dateStr}T00:00:00`, 24 * 60));
+
+  if (isGoogleConfigured()) {
+    try {
+      const busy = await getBusyIntervals(
+        windowStart.toISOString(),
+        windowEnd.toISOString()
       );
 
-      // Filter futureSlots against busyEvents
-      futureSlots = futureSlots.filter((slot) => {
-        const slotStart = new Date(slot.startIso + '+08:00').getTime();
-        const slotEnd = new Date(slot.endIso + '+08:00').getTime();
-
-        const isOverlapping = busyEvents.some((ev: any) => {
-          const evStart = new Date(ev.start.dateTime + 'Z').getTime();
-          const evEnd = new Date(ev.end.dateTime + 'Z').getTime();
-          // overlap condition: SlotStart < EvEnd AND SlotEnd > EvStart
-          return slotStart < evEnd && slotEnd > evStart;
+      slots = slots.filter((slot) => {
+        const start = localToUtc(slot.startIso).getTime();
+        const end = localToUtc(slot.endIso).getTime();
+        return !busy.some((b) => {
+          const bStart = new Date(b.start).getTime();
+          const bEnd = new Date(b.end).getTime();
+          return start < bEnd && end > bStart; // overlap
         });
-
-        return !isOverlapping; // keep slot if NO overlap
       });
+    } catch (err) {
+      console.error('[availability] Google free/busy lookup failed:', err);
+      // Degrade open — see the note on this function.
     }
-  } catch (err) {
-    console.error('Failed to fetch calendar for availability:', err);
-    // If it fails, we fall back to showing all future slots to not block bookings,
-    // though realistically we'd want to handle this better in a production app.
   }
 
-  return futureSlots;
+  // --- 3. Subtract slots already held in Supabase --------------------------
+  try {
+    const taken = new Set(
+      await getBookedSlotStarts(windowStart.toISOString(), windowEnd.toISOString())
+    );
+    if (taken.size > 0) {
+      slots = slots.filter(
+        (slot) => !taken.has(localToUtc(slot.startIso).toISOString())
+      );
+    }
+  } catch (err) {
+    console.error('[availability] Supabase booked-slot lookup failed:', err);
+  }
+
+  return slots;
+}
+
+/** The slot matching a "HH:MM" value, or null if it is not bookable. */
+export async function findSlot(dateStr: string, time: string): Promise<TimeSlot | null> {
+  const slots = await getSlotsForDate(dateStr);
+  return slots.find((s) => s.value === time) ?? null;
 }
 
 export async function isDateAvailable(dateStr: string): Promise<boolean> {
-  const slots = await getSlotsForDate(dateStr);
-  return slots.length > 0;
+  return (await getSlotsForDate(dateStr)).length > 0;
 }
+
+export { TIMEZONE };

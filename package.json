@@ -5,11 +5,15 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "google:auth": "node scripts/google-auth.mjs",
+    "recover": "node scripts/recover-history.mjs"
   },
   "dependencies": {
-    "@azure/msal-node": "^5.2.5",
+    "@supabase/supabase-js": "^2.117.2",
     "next": "^16.2.9",
+    "nodemailer": "^10.0.10",
     "postcss": "^8.5.15",
     "react": "^19.2.4",
     "react-dom": "^19.2.4"
@@ -17,6 +21,7 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4.3.1",
     "@types/node": "^20.19.43",
+    "@types/nodemailer": "^8.0.2",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "tailwindcss": "^4.3.1",

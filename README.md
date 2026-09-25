@@ -1,36 +1,72 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# AnyHealth Smart Intake Scheduler
 
-## Getting Started
+A five-step intake wizard that books a 30-minute consultation: it saves the answers to
+Supabase, creates a Google Calendar event with a Google Meet link, and sends branded
+confirmation emails through Zoho Mail.
 
-First, run the development server:
-
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+```
+ /book  ──▶  POST /api/book
+               │
+               ├─ 1. INSERT into Supabase          ← happens first, always
+               ├─ 2. Google Calendar event + Meet link
+               ├─ 3. Zoho Mail: client confirmation + internal notification
+               └─ 4. record the outcome of each step back on the row
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Step 1 comes first on purpose. Whatever Google or Zoho do afterwards, the booking and
+the intake answers are already on disk — the failure mode that wiped the old history
+cannot repeat.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Stack
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+| Concern | Service |
+|---|---|
+| Framework | Next.js 16 (App Router) |
+| Database | Supabase (Postgres, RLS on, service-role access from the server only) |
+| Calendar + video | Google Calendar API — the event and the Meet link come from one call |
+| Email | Zoho Mail over SMTP (or ZeptoMail — same variables) |
 
-## Learn More
+Previously Microsoft Graph/Outlook + Zoom; both have been removed.
 
-To learn more about Next.js, take a look at the following resources:
+## Getting started
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```bash
+npm install
+cp .env.example .env.local   # then fill it in — see SETUP.md
+npm run dev
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Full walkthrough, including where every credential comes from: **[SETUP.md](SETUP.md)**.
 
-## Deploy on Vercel
+## Scripts
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+| Command | What it does |
+|---|---|
+| `npm run dev` | Development server |
+| `npm run build` | Production build |
+| `npm run typecheck` | `tsc --noEmit` |
+| `npm run google:auth` | One-time OAuth flow that prints `GOOGLE_REFRESH_TOKEN` |
+| `npm run recover -- --zoom` | Rebuild lost history from the old Zoom account |
+| `npm run recover -- --ics <file>` | Rebuild lost history from an exported calendar |
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Both recovery modes take `--dry-run` and `--csv`.
+
+## Routes
+
+| Route | Purpose |
+|---|---|
+| `/book` | The intake wizard |
+| `/confirmed` | Confirmation page with the Meet link and an .ics download |
+| `/admin` | Every booking, with the status of each step (needs `ADMIN_TOKEN`) |
+| `GET /api/availability?date=YYYY-MM-DD` | Bookable slots, minus Google busy time and slots already held |
+| `POST /api/book` | Creates the booking |
+| `GET /api/admin/health` | Live check of Supabase, Google and Zoho — run after every deploy |
+| `GET /api/admin/bookings` | JSON list of bookings |
+
+## Where the answers live
+
+`public.bookings` holds one row per booking: the client's details, `role` and
+`challenges` as their own columns, the whole submitted form as `answers` (JSONB), the
+Meet link and Google event ID, and the status of the calendar write and each email.
+`public.booking_events` is an append-only log of every step. Between them, "what did I
+miss?" is a query rather than a guess.

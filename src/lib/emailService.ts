@@ -1,305 +1,256 @@
-import { graphRequest } from './graphClient';
+import { buildIcs } from './ics';
+import {
+  FROM_EMAIL,
+  NOTIFY_EMAIL,
+  sendMail,
+  type MailResult,
+} from './mailer';
+import { TIMEZONE, formatDateOnly, formatForHumans } from './time';
 
-const FROM_EMAIL      = process.env.FROM_EMAIL ?? 'contact@anyhealth.asia';
-const NOTIFY_EMAIL    = process.env.NOTIFY_EMAIL ?? 'contact@anyhealth.asia';
-const APP_URL         = process.env.NEXT_PUBLIC_BASE_URL ?? 'http://localhost:3000';
+const APP_URL = process.env.NEXT_PUBLIC_BASE_URL ?? 'http://localhost:3000';
 
-function formatDateTime(isoLocal: string): string {
-  // isoLocal is "YYYY-MM-DDTHH:MM:SS" in Asia/Singapore time
-  const [datePart, timePart] = isoLocal.split('T');
-  const [year, month, day] = datePart.split('-').map(Number);
-  const [hour, minute] = timePart.split(':').map(Number);
+/* Brand tokens, kept in step with src/app/globals.css */
+const GREEN = '#006c4e';
+const GREEN_DARK = '#004732';
+const INK = '#171d1a';
+const MUTED = '#3d4a43';
+const LINE = '#bccac1';
+const CANVAS = '#f5fbf5';
 
-  const date = new Date(Date.UTC(year, month - 1, day));
-  const dateStr = date.toLocaleDateString('en-GB', {
-    weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
-    timeZone: 'UTC',
-  });
-
-  const h12 = hour % 12 || 12;
-  const ampm = hour < 12 ? 'AM' : 'PM';
-  const timeStr = `${h12}:${String(minute).padStart(2, '0')} ${ampm} (SGT / MYT)`;
-
-  return `${dateStr} at ${timeStr}`;
+/** Everything in these templates is user-supplied, so nothing goes in raw. */
+function esc(value: unknown): string {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
-function generateIcs(params: {
-  uid: string;
-  summary: string;
-  description: string;
-  location: string;
-  startIso: string;   // "YYYY-MM-DDTHH:MM:SS" local SG time
-  endIso: string;
-  organizerEmail: string;
-  clientEmail: string;
-  clientName: string;
-}): string {
-  // Convert local "YYYY-MM-DDTHH:MM:SS" to UTC stamp (SG = UTC+8)
-  function toUtcStamp(localIso: string): string {
-    const [datePart, timePart] = localIso.split('T');
-    const [y, mo, d] = datePart.split('-').map(Number);
-    const [h, mi] = timePart.split(':').map(Number);
-    const utc = new Date(Date.UTC(y, mo - 1, d, h - 8, mi)); // subtract UTC+8
-    return utc.toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z';
-  }
-
-  const now = new Date().toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z';
-
-  return [
-    'BEGIN:VCALENDAR',
-    'VERSION:2.0',
-    'PRODID:-//AnyHealth//Booking System//EN',
-    'CALSCALE:GREGORIAN',
-    'METHOD:REQUEST',
-    'BEGIN:VEVENT',
-    `UID:${params.uid}`,
-    `DTSTAMP:${now}`,
-    `DTSTART:${toUtcStamp(params.startIso)}`,
-    `DTEND:${toUtcStamp(params.endIso)}`,
-    `SUMMARY:${params.summary}`,
-    `DESCRIPTION:${params.description.replace(/\n/g, '\\n')}`,
-    `LOCATION:${params.location}`,
-    `ORGANIZER;CN=AnyHealth:mailto:${params.organizerEmail}`,
-    `ATTENDEE;CN=${params.clientName};ROLE=REQ-PARTICIPANT;RSVP=TRUE:mailto:${params.clientEmail}`,
-    'STATUS:CONFIRMED',
-    'SEQUENCE:0',
-    'BEGIN:VALARM',
-    'TRIGGER:-PT30M',
-    'ACTION:DISPLAY',
-    'DESCRIPTION:Upcoming AnyHealth Appointment',
-    'END:VALARM',
-    'END:VEVENT',
-    'END:VCALENDAR',
-  ].join('\r\n');
-}
-
-async function sendEmail(payload: {
-  to: string[];
-  subject: string;
-  html: string;
-  attachments?: Array<{ filename: string; content: string; type: string }>;
-}) {
-  const message: any = {
-    subject: payload.subject,
-    body: {
-      contentType: 'HTML',
-      content: payload.html,
-    },
-    toRecipients: payload.to.map((email) => ({
-      emailAddress: { address: email },
-    })),
-  };
-
-  if (payload.attachments?.length) {
-    message.attachments = payload.attachments.map((a) => ({
-      '@odata.type': '#microsoft.graph.fileAttachment',
-      name: a.filename,
-      contentType: a.type,
-      contentBytes: a.content,
-    }));
-  }
-
-  await graphRequest('POST', `/users/${FROM_EMAIL}/sendMail`, {
-    message,
-    saveToSentItems: true,
-  });
-}
-
-export interface EmailBookingParams {
-  bookingId: string;
+export interface BookingEmailParams {
+  bookingRef: string;
   clientName: string;
   clientEmail: string;
-  clientPhone: string;
-  goal: string;
-  challenges: string[];
-  startIso: string;
-  endIso: string;
-  zoomJoinUrl: string;
-  zoomMeetingId: string | number;
-  zoomPassword: string;
+  clientPhone?: string;
+  role?: string;
+  challenges?: string[];
+  /** Local wall-clock, "YYYY-MM-DDTHH:MM:SS". */
+  startLocal: string;
+  endLocal: string;
+  meetUrl: string;
+  durationMinutes?: number;
 }
 
-export async function sendClientConfirmation(p: EmailBookingParams) {
-  const dateTimeStr = formatDateTime(p.startIso);
-  const icsContent  = generateIcs({
-    uid: `anyhealth-${p.bookingId}@anyhealth.asia`,
-    summary: 'AnyHealth – Initial Consultation',
-    description: `Your AnyHealth consultation is confirmed.\n\nJoin Zoom: ${p.zoomJoinUrl}\nMeeting ID: ${p.zoomMeetingId}\nPasscode: ${p.zoomPassword}`,
-    location: p.zoomJoinUrl,
-    startIso: p.startIso,
-    endIso: p.endIso,
+function icsFor(p: BookingEmailParams, forPractitioner: boolean): string {
+  const lines = [
+    forPractitioner
+      ? 'New client consultation booked through the AnyHealth scheduler.'
+      : 'Your AnyHealth consultation is confirmed.',
+    '',
+    `Join on Google Meet: ${p.meetUrl}`,
+    '',
+    `Name: ${p.clientName}`,
+    `Email: ${p.clientEmail}`,
+    p.clientPhone ? `Phone: ${p.clientPhone}` : '',
+    p.role ? `Role: ${p.role}` : '',
+    p.challenges?.length ? `Challenges: ${p.challenges.join('; ')}` : '',
+    '',
+    `Booking ref: ${p.bookingRef}`,
+  ].filter(Boolean);
+
+  return buildIcs({
+    uid: `anyhealth-${p.bookingRef}@anyhealth.asia`,
+    summary: forPractitioner
+      ? `AnyHealth Consultation – ${p.clientName}`
+      : 'AnyHealth – Initial Consultation',
+    description: lines.join('\n'),
+    location: p.meetUrl,
+    url: p.meetUrl,
+    startLocal: p.startLocal,
+    endLocal: p.endLocal,
     organizerEmail: FROM_EMAIL,
-    clientEmail: p.clientEmail,
-    clientName: p.clientName,
-  });
-
-  const icsBase64 = Buffer.from(icsContent).toString('base64');
-
-  const html = `
-<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
-<body style="margin:0;padding:0;background:#f8f9fc;font-family:'Helvetica Neue',Arial,sans-serif">
-  <div style="max-width:600px;margin:32px auto;padding:0 16px">
-    <!-- Header -->
-    <div style="text-align:center;padding:32px 0 24px">
-      <div style="font-size:28px;font-weight:800;color:#374187;letter-spacing:-0.5px">AnyHealth</div>
-    </div>
-    <!-- Card -->
-    <div style="background:white;border-radius:24px;padding:40px;box-shadow:0 4px 24px rgba(0,0,0,0.06)">
-      <div style="text-align:center;margin-bottom:32px">
-        <div style="width:64px;height:64px;background:linear-gradient(135deg,#e8f4ff,#dce8ff);border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 16px">
-          <span style="font-size:32px">✅</span>
-        </div>
-        <h1 style="font-size:24px;font-weight:700;color:#191c1e;margin:0 0 8px">You're booked, ${p.clientName}!</h1>
-        <p style="font-size:16px;color:#454650;margin:0">Your initial consultation is confirmed.</p>
-      </div>
-      <!-- Appointment details -->
-      <div style="background:#f2f3f6;border-radius:16px;padding:24px;margin-bottom:24px">
-        <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
-          <span style="font-size:20px">📅</span>
-          <div>
-            <div style="font-size:12px;font-weight:600;color:#767682;text-transform:uppercase;letter-spacing:0.08em;font-family:'Courier New',monospace">Date & Time</div>
-            <div style="font-size:16px;font-weight:600;color:#191c1e;margin-top:2px">${dateTimeStr}</div>
-          </div>
-        </div>
-        <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
-          <span style="font-size:20px">⏱️</span>
-          <div>
-            <div style="font-size:12px;font-weight:600;color:#767682;text-transform:uppercase;letter-spacing:0.08em;font-family:'Courier New',monospace">Duration</div>
-            <div style="font-size:16px;font-weight:600;color:#191c1e;margin-top:2px">30 minutes</div>
-          </div>
-        </div>
-        <div style="display:flex;align-items:center;gap:12px">
-          <span style="font-size:20px">💻</span>
-          <div>
-            <div style="font-size:12px;font-weight:600;color:#767682;text-transform:uppercase;letter-spacing:0.08em;font-family:'Courier New',monospace">Format</div>
-            <div style="font-size:16px;font-weight:600;color:#191c1e;margin-top:2px">Online via Zoom</div>
-          </div>
-        </div>
-      </div>
-      <!-- Zoom join button -->
-      <div style="text-align:center;margin-bottom:24px">
-        <a href="${p.zoomJoinUrl}" style="display:inline-block;background:#0b5cad;color:white;font-weight:700;font-size:16px;padding:16px 32px;border-radius:9999px;text-decoration:none;letter-spacing:-0.2px">
-          🎥 Join Zoom Meeting
-        </a>
-        <div style="margin-top:12px;font-size:13px;color:#767682">
-          Meeting ID: <strong>${p.zoomMeetingId}</strong> &nbsp;·&nbsp; Passcode: <strong>${p.zoomPassword}</strong>
-        </div>
-      </div>
-      <hr style="border:none;border-top:1px solid #e7e8eb;margin:24px 0">
-      <!-- What to expect -->
-      <div style="margin-bottom:24px">
-        <h3 style="font-size:16px;font-weight:700;color:#191c1e;margin:0 0 12px">What to expect:</h3>
-        <ul style="margin:0;padding-left:20px;color:#454650;font-size:15px;line-height:1.7">
-          <li>A friendly 30-minute demo call to understand your goals.</li>
-          <li>Find out how we can better support your patient outcomes.</li>
-          <li>Discuss plans and product lines for your company.</li>
-        </ul>
-      </div>
-      <div style="background:#fff8f0;border:1px solid #ffd6a5;border-radius:12px;padding:16px;margin-bottom:24px">
-        <p style="margin:0;font-size:14px;color:#6b3d00">
-          <strong>📎 Calendar invite attached</strong> — Open the attached .ics file to add this appointment to your calendar (works with Outlook, Google Calendar & Apple Calendar).
-        </p>
-      </div>
-      <p style="font-size:14px;color:#767682;text-align:center;margin:0">
-        Questions? Reply to this email or contact us at <a href="mailto:${FROM_EMAIL}" style="color:#374187">${FROM_EMAIL}</a>
-      </p>
-    </div>
-    <div style="text-align:center;padding:24px 0;font-size:13px;color:#a0a0a8">
-      © ${new Date().getFullYear()} AnyHealth · <a href="${APP_URL}" style="color:#374187">anyhealth.asia</a>
-    </div>
-  </div>
-</body>
-</html>`;
-
-  await sendEmail({
-    to: [p.clientEmail],
-    subject: `✅ Confirmed: Your AnyHealth Consultation on ${dateTimeStr.split(' at ')[0]}`,
-    html,
-    attachments: [
-      { filename: 'anyhealth-appointment.ics', content: icsBase64, type: 'text/calendar;method=REQUEST' },
-    ],
+    organizerName: 'AnyHealth',
+    attendeeEmail: forPractitioner ? NOTIFY_EMAIL : p.clientEmail,
+    attendeeName: forPractitioner ? 'AnyHealth' : p.clientName,
   });
 }
 
-export async function sendPractitionerNotification(p: EmailBookingParams) {
-  const dateTimeStr = formatDateTime(p.startIso);
-  
-  const icsContent  = generateIcs({
-    uid: `anyhealth-${p.bookingId}@anyhealth.asia`,
-    summary: `AnyHealth Initial Consultation – ${p.clientName}`,
-    description: `New client consultation.\n\nJoin Zoom: ${p.zoomJoinUrl}\nMeeting ID: ${p.zoomMeetingId}\nPasscode: ${p.zoomPassword}`,
-    location: p.zoomJoinUrl,
-    startIso: p.startIso,
-    endIso: p.endIso,
-    organizerEmail: p.clientEmail,
-    clientEmail: NOTIFY_EMAIL,
-    clientName: 'AnyHealth Scheduler',
-  });
-
-  const icsBase64 = Buffer.from(icsContent).toString('base64');
-
-  const html = `
-<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"></head>
-<body style="margin:0;padding:0;background:#f8f9fc;font-family:'Helvetica Neue',Arial,sans-serif">
-  <div style="max-width:600px;margin:32px auto;padding:0 16px">
-    <div style="background:white;border-radius:24px;padding:40px;box-shadow:0 4px 24px rgba(0,0,0,0.06)">
-      <h1 style="font-size:22px;font-weight:700;color:#374187;margin:0 0 8px">🗓️ New Booking — AnyHealth</h1>
-      <p style="font-size:15px;color:#454650;margin:0 0 24px">A new consultation has been booked via the AnyHealth scheduler.</p>
-      <table style="width:100%;border-collapse:collapse;font-size:15px">
-        <tr style="border-bottom:1px solid #e7e8eb">
-          <td style="padding:12px 0;font-weight:600;color:#767682;width:140px">Client Name</td>
-          <td style="padding:12px 0;color:#191c1e">${p.clientName}</td>
-        </tr>
-        <tr style="border-bottom:1px solid #e7e8eb">
-          <td style="padding:12px 0;font-weight:600;color:#767682">Email</td>
-          <td style="padding:12px 0;color:#191c1e"><a href="mailto:${p.clientEmail}" style="color:#374187">${p.clientEmail}</a></td>
-        </tr>
-        <tr style="border-bottom:1px solid #e7e8eb">
-          <td style="padding:12px 0;font-weight:600;color:#767682">Phone</td>
-          <td style="padding:12px 0;color:#191c1e">${p.clientPhone}</td>
-        </tr>
-        <tr style="border-bottom:1px solid #e7e8eb">
-          <td style="padding:12px 0;font-weight:600;color:#767682">Date & Time</td>
-          <td style="padding:12px 0;color:#191c1e"><strong>${dateTimeStr}</strong></td>
-        </tr>
-        <tr style="border-bottom:1px solid #e7e8eb">
-          <td style="padding:12px 0;font-weight:600;color:#767682">Goal</td>
-          <td style="padding:12px 0;color:#191c1e">${p.goal}</td>
-        </tr>
-        <tr style="border-bottom:1px solid #e7e8eb">
-          <td style="padding:12px 0;font-weight:600;color:#767682">Challenges</td>
-          <td style="padding:12px 0;color:#191c1e">${p.challenges.join(', ')}</td>
-        </tr>
-        <tr style="border-bottom:1px solid #e7e8eb">
-          <td style="padding:12px 0;font-weight:600;color:#767682">Booking ID</td>
-          <td style="padding:12px 0;color:#767682;font-family:'Courier New',monospace;font-size:13px">${p.bookingId}</td>
-        </tr>
-      </table>
-      <div style="margin-top:24px;text-align:center">
-        <a href="${p.zoomJoinUrl}" style="display:inline-block;background:#0b5cad;color:white;font-weight:700;font-size:15px;padding:14px 28px;border-radius:9999px;text-decoration:none">
-          🎥 Join as Host
-        </a>
-      </div>
-      <div style="background:#fff8f0;border:1px solid #ffd6a5;border-radius:12px;padding:16px;margin-top:24px">
-        <p style="margin:0;font-size:14px;color:#6b3d00">
-          <strong>📎 Calendar invite attached</strong> — Open the attached .ics file to add this appointment to your calendar.
-        </p>
-      </div>
+function shell(inner: string): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:${CANVAS};font-family:'Helvetica Neue',Arial,sans-serif">
+  <div style="max-width:600px;margin:0 auto;padding:0 16px">
+    <div style="text-align:center;padding:32px 0 24px">
+      <div style="font-size:28px;font-weight:800;color:${GREEN};letter-spacing:-0.5px">AnyHealth</div>
+    </div>
+    ${inner}
+    <div style="text-align:center;padding:24px 0;font-size:13px;color:${MUTED}">
+      &copy; ${new Date().getFullYear()} AnyHealth &middot;
+      <a href="${esc(APP_URL)}" style="color:${GREEN}">anyhealth.asia</a>
     </div>
   </div>
 </body>
 </html>`;
+}
 
-  await sendEmail({
-    to: [NOTIFY_EMAIL],
-    subject: `📋 New Booking: ${p.clientName} — ${dateTimeStr.split(' at ')[0]}`,
+function detailRow(icon: string, label: string, value: string): string {
+  return `
+    <tr>
+      <td style="padding:10px 12px 10px 0;vertical-align:top;font-size:20px;width:32px">${icon}</td>
+      <td style="padding:10px 0;vertical-align:top">
+        <div style="font-size:12px;font-weight:600;color:${MUTED};text-transform:uppercase;letter-spacing:0.08em">${esc(label)}</div>
+        <div style="font-size:16px;font-weight:600;color:${INK};margin-top:2px">${value}</div>
+      </td>
+    </tr>`;
+}
+
+/* ─── Client confirmation ────────────────────────────────────────────────── */
+
+export async function sendClientConfirmation(p: BookingEmailParams): Promise<MailResult> {
+  const when = formatForHumans(p.startLocal, TIMEZONE);
+  const duration = p.durationMinutes ?? 30;
+
+  const html = shell(`
+    <div style="background:#ffffff;border:1px solid ${LINE};border-radius:24px;padding:40px">
+      <div style="text-align:center;margin-bottom:28px">
+        <div style="font-size:40px;line-height:1">&#9989;</div>
+        <h1 style="font-size:24px;font-weight:700;color:${INK};margin:12px 0 8px">You're booked, ${esc(p.clientName)}!</h1>
+        <p style="font-size:16px;color:${MUTED};margin:0">Your initial consultation is confirmed.</p>
+      </div>
+
+      <table role="presentation" style="width:100%;border-collapse:collapse;background:${CANVAS};border-radius:16px;padding:8px">
+        <tbody>
+          ${detailRow('&#128197;', 'Date &amp; time', esc(when))}
+          ${detailRow('&#9201;', 'Duration', `${duration} minutes`)}
+          ${detailRow('&#128187;', 'Format', 'Online via Google Meet')}
+        </tbody>
+      </table>
+
+      <div style="text-align:center;margin:28px 0 8px">
+        <a href="${esc(p.meetUrl)}" style="display:inline-block;background:${GREEN};color:#ffffff;font-weight:700;font-size:16px;padding:16px 32px;border-radius:9999px;text-decoration:none">
+          Join Google Meet
+        </a>
+        <div style="margin-top:12px;font-size:13px;color:${MUTED};word-break:break-all">
+          <a href="${esc(p.meetUrl)}" style="color:${GREEN}">${esc(p.meetUrl)}</a>
+        </div>
+      </div>
+
+      <hr style="border:none;border-top:1px solid ${LINE};margin:28px 0">
+
+      <h3 style="font-size:16px;font-weight:700;color:${INK};margin:0 0 12px">What to expect</h3>
+      <ul style="margin:0 0 24px;padding-left:20px;color:${MUTED};font-size:15px;line-height:1.7">
+        <li>A friendly ${duration}-minute call to understand your goals.</li>
+        <li>How we can better support your patient outcomes.</li>
+        <li>Plans and product lines that fit your practice.</li>
+      </ul>
+
+      <div style="background:#ffffff;border:1px solid ${LINE};border-radius:12px;padding:16px;margin-bottom:24px">
+        <p style="margin:0;font-size:14px;color:${GREEN_DARK}">
+          <strong>Calendar invite attached.</strong> Open the .ics file to add this to
+          Google Calendar, Outlook or Apple Calendar. You'll also get a Google Calendar
+          invite to <strong>${esc(p.clientEmail)}</strong>.
+        </p>
+      </div>
+
+      <p style="font-size:14px;color:${MUTED};text-align:center;margin:0">
+        Need to reschedule? Just reply to this email &mdash;
+        <a href="mailto:${esc(FROM_EMAIL)}" style="color:${GREEN}">${esc(FROM_EMAIL)}</a><br>
+        <span style="font-size:12px">Booking ref ${esc(p.bookingRef)}</span>
+      </p>
+    </div>`);
+
+  return sendMail({
+    to: p.clientEmail,
+    subject: `Confirmed: your AnyHealth consultation on ${formatDateOnly(p.startLocal, TIMEZONE)}`,
     html,
-    attachments: [
-      { filename: 'anyhealth-appointment.ics', content: icsBase64, type: 'text/calendar;method=REQUEST' },
-    ],
+    icsContent: icsFor(p, false),
+  });
+}
+
+/* ─── Internal notification ──────────────────────────────────────────────── */
+
+export async function sendPractitionerNotification(
+  p: BookingEmailParams
+): Promise<MailResult> {
+  const when = formatForHumans(p.startLocal, TIMEZONE);
+
+  const row = (label: string, value: string) => `
+    <tr style="border-bottom:1px solid ${LINE}">
+      <td style="padding:12px 0;font-weight:600;color:${MUTED};width:150px;vertical-align:top">${esc(label)}</td>
+      <td style="padding:12px 0;color:${INK}">${value}</td>
+    </tr>`;
+
+  const html = shell(`
+    <div style="background:#ffffff;border:1px solid ${LINE};border-radius:24px;padding:40px">
+      <h1 style="font-size:22px;font-weight:700;color:${GREEN};margin:0 0 8px">New booking</h1>
+      <p style="font-size:15px;color:${MUTED};margin:0 0 24px">
+        Someone booked a consultation through the AnyHealth scheduler.
+      </p>
+
+      <table role="presentation" style="width:100%;border-collapse:collapse;font-size:15px">
+        <tbody>
+          ${row('Date &amp; time', `<strong>${esc(when)}</strong>`)}
+          ${row('Name', esc(p.clientName))}
+          ${row('Email', `<a href="mailto:${esc(p.clientEmail)}" style="color:${GREEN}">${esc(p.clientEmail)}</a>`)}
+          ${row('Phone', p.clientPhone ? esc(p.clientPhone) : '<span style="color:#999">not given</span>')}
+          ${row('Role', p.role ? esc(p.role) : '<span style="color:#999">not given</span>')}
+          ${row(
+            'Challenges',
+            p.challenges?.length
+              ? p.challenges.map((c) => esc(c)).join('<br>')
+              : '<span style="color:#999">none selected</span>'
+          )}
+          ${row('Booking ref', `<code style="font-size:13px">${esc(p.bookingRef)}</code>`)}
+        </tbody>
+      </table>
+
+      <div style="margin-top:28px;text-align:center">
+        <a href="${esc(p.meetUrl)}" style="display:inline-block;background:${GREEN};color:#ffffff;font-weight:700;font-size:15px;padding:14px 28px;border-radius:9999px;text-decoration:none">
+          Join as host
+        </a>
+      </div>
+
+      <p style="margin:24px 0 0;font-size:13px;color:${MUTED};text-align:center">
+        Saved in Supabase &middot;
+        <a href="${esc(APP_URL)}/admin" style="color:${GREEN}">open the bookings list</a>
+      </p>
+    </div>`);
+
+  return sendMail({
+    to: NOTIFY_EMAIL,
+    replyTo: p.clientEmail,
+    subject: `New booking: ${p.clientName} — ${formatDateOnly(p.startLocal, TIMEZONE)}`,
+    html,
+    icsContent: icsFor(p, true),
+  });
+}
+
+/**
+ * Last-resort alert used when the booking could not be written to Supabase.
+ * The whole point is that the answers exist somewhere no matter what fails.
+ */
+export async function sendPersistenceFailureAlert(
+  p: BookingEmailParams & { reason: string; rawPayload: unknown }
+): Promise<MailResult> {
+  const html = shell(`
+    <div style="background:#fff;border:2px solid #b3261e;border-radius:24px;padding:32px">
+      <h1 style="font-size:20px;font-weight:700;color:#b3261e;margin:0 0 12px">
+        Booking was NOT saved to Supabase
+      </h1>
+      <p style="font-size:15px;color:${MUTED};margin:0 0 16px">
+        The consultation below was accepted but could not be written to the database.
+        Record it by hand &mdash; this email is the only copy.
+      </p>
+      <p style="font-size:14px;color:${INK};margin:0 0 16px"><strong>Reason:</strong> ${esc(p.reason)}</p>
+      <pre style="background:${CANVAS};border:1px solid ${LINE};border-radius:12px;padding:16px;font-size:13px;white-space:pre-wrap;word-break:break-word;color:${INK}">${esc(
+        JSON.stringify(p.rawPayload, null, 2)
+      )}</pre>
+    </div>`);
+
+  return sendMail({
+    to: NOTIFY_EMAIL,
+    subject: `[ACTION NEEDED] Booking not saved — ${p.clientName} (${p.bookingRef})`,
+    html,
   });
 }

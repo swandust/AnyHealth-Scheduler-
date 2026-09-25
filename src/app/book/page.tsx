@@ -8,16 +8,15 @@ interface BookingState {
   name: string; email: string; phone: string
 }
 
-const TIME_SLOTS = [
-  { label: '8:00 AM', value: '08:00' }, { label: '8:45 AM', value: '08:45' },
-  { label: '9:30 AM', value: '09:30' }, { label: '10:15 AM', value: '10:15' },
-  { label: '11:00 AM', value: '11:00' },
-  { label: '2:00 PM', value: '14:00' }, { label: '2:45 PM', value: '14:45' },
-  { label: '3:30 PM', value: '15:30' }, { label: '4:15 PM', value: '16:15' },
-  { label: '5:00 PM', value: '17:00' },
-  { label: '9:00 PM', value: '21:00' }, { label: '9:45 PM', value: '21:45' },
-  { label: '10:30 PM', value: '22:30' }, { label: '11:15 PM', value: '23:15' },
-]
+/**
+ * Slot times come from /api/availability — the server owns the schedule.
+ * This only turns a "14:30" value into "2:30 PM" for display.
+ */
+const fmtTimeValue = (v: string) => {
+  const [h, m] = v.split(':').map(Number)
+  if (Number.isNaN(h) || Number.isNaN(m)) return v
+  return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${h < 12 ? 'AM' : 'PM'}`
+}
 
 const ROLES = [
   'GP', 'Dentist', 'Specialist', 'Pharmacist',
@@ -184,13 +183,20 @@ export default function BookPage() {
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || 'Booking failed')
-      router.push('/confirmed?' + new URLSearchParams({ name: state.name, date: state.date, time: state.time, zoomUrl: data.zoomJoinUrl || '', bookingId: data.bookingId || '' }))
+      router.push('/confirmed?' + new URLSearchParams({
+        name: state.name,
+        date: state.date,
+        time: state.time,
+        start: data.startIso || '',
+        meetUrl: data.meetUrl || '',
+        ref: data.bookingRef || '',
+      }))
     } catch (e: unknown) { setError(e instanceof Error ? e.message : 'Something went wrong') }
     finally { setSubmitting(false) }
   }
 
   const fmtDate = (d: string) => d ? new Date(d+'T00:00:00').toLocaleDateString('en-GB',{weekday:'short',day:'numeric',month:'short'}) : ''
-  const fmtSlot = (v: string) => TIME_SLOTS.find(s=>s.value===v)?.label || v
+  const fmtSlot = (v: string) => availableSlots.find(s => s.value === v)?.label || fmtTimeValue(v)
 
   const cardStyle: React.CSSProperties = {
     position: 'relative', background: 'var(--surface-container-lowest)',
@@ -476,7 +482,7 @@ export default function BookPage() {
                         { icon: 'badge', label: 'Role', value: state.role },
                         { icon: 'calendar_today', label: 'Date', value: fmtDate(state.date) },
                         { icon: 'schedule', label: 'Time', value: fmtSlot(state.time) },
-                        { icon: 'videocam', label: 'Format', value: 'Zoom · 30 min' },
+                        { icon: 'videocam', label: 'Format', value: 'Google Meet · 30 min' },
                       ].map(r => (
                         <div key={r.label} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 0', borderBottom: '1px solid var(--outline-variant)' }}>
                           <span className="material-symbols-outlined" style={{ color: 'var(--primary)', fontSize: 18 }}>{r.icon}</span>
