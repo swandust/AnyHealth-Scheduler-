@@ -23,6 +23,9 @@ interface Booking {
   client_email_status: string
   practitioner_email_status: string
   source: string
+  visitor_id: string | null
+  source_path: string | null
+  utm: Record<string, string> | null
   created_at: string
 }
 
@@ -205,6 +208,7 @@ export default function AdminPage() {
               <th style={head}>Client mail</th>
               <th style={head}>Our mail</th>
               <th style={head}>Meet</th>
+              <th style={head}>Came from</th>
               <th style={head}>Ref</th>
             </tr>
           </thead>
@@ -233,6 +237,13 @@ export default function AdminPage() {
                     ? <a href={b.meet_url} target="_blank" rel="noreferrer" style={{ color: 'var(--primary)' }}>Join</a>
                     : '—'}
                 </td>
+                <td style={{ ...cell, fontSize: 12, maxWidth: 180 }}>
+                  {b.visitor_id
+                    ? <span title={b.visitor_id} style={{ color: 'var(--primary)', fontWeight: 600 }}>known visitor</span>
+                    : <span style={{ color: 'var(--on-surface-variant)' }}>direct / unknown</span>}
+                  {b.source_path && <><br /><span style={{ color: 'var(--on-surface-variant)' }}>{b.source_path}</span></>}
+                  {b.utm?.utm_source && <><br /><span style={{ color: 'var(--on-surface-variant)' }}>via {b.utm.utm_source}</span></>}
+                </td>
                 <td style={{ ...cell, fontFamily: 'monospace', fontSize: 12, color: 'var(--on-surface-variant)' }}>
                   {b.booking_ref}
                   {b.source !== 'web' && <><br /><em>{b.source}</em></>}
@@ -241,7 +252,7 @@ export default function AdminPage() {
             ))}
             {!loading && bookings.length === 0 && (
               <tr>
-                <td colSpan={10} style={{ ...cell, textAlign: 'center', padding: 48, color: 'var(--on-surface-variant)' }}>
+                <td colSpan={11} style={{ ...cell, textAlign: 'center', padding: 48, color: 'var(--on-surface-variant)' }}>
                   No bookings yet.
                 </td>
               </tr>

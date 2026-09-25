@@ -76,6 +76,11 @@ export interface BookingRow {
   email_error: string | null;
   source: string;
   user_agent: string | null;
+  visitor_id: string | null;
+  session_id: string | null;
+  source_path: string | null;
+  referrer: string | null;
+  utm: Record<string, string>;
   created_at: string;
   updated_at: string;
 }
@@ -98,6 +103,11 @@ export interface NewBooking {
   duration_minutes?: number;
   source?: string;
   user_agent?: string | null;
+  visitor_id?: string | null;
+  session_id?: string | null;
+  source_path?: string | null;
+  referrer?: string | null;
+  utm?: Record<string, string>;
 }
 
 /** Postgres unique-violation — raised by the `bookings_one_per_slot` index. */
@@ -183,6 +193,38 @@ export async function logBookingEvent(params: {
   });
 
   if (error) console.error('[supabase] logBookingEvent failed:', error.message);
+}
+
+/**
+ * Write a row into the website's own `website_events` table, so a booking
+ * shows up in the same funnel as every other visitor action rather than
+ * living only in `bookings`.
+ *
+ * Never throws: analytics must not be able to fail a booking.
+ */
+export async function recordWebsiteEvent(params: {
+  visitorId: string | null;
+  sessionId: string | null;
+  eventName: string;
+  path?: string | null;
+  data?: Record<string, unknown>;
+}): Promise<void> {
+  const db = getSupabase();
+  // visitor_id is a uuid column — a null is fine, a malformed string is not.
+  if (!db) return;
+
+  const { error } = await db.from('website_events').insert({
+    visitor_id: params.visitorId,
+    session_id: params.sessionId,
+    event_name: params.eventName,
+    path: params.path ?? null,
+    event_data: params.data ?? {},
+  });
+
+  if (error) {
+    // A missing table just means the analytics tables were never created.
+    console.error('[supabase] recordWebsiteEvent failed:', error.message);
+  }
 }
 
 /* ─── Reads ──────────────────────────────────────────────────────────────── */

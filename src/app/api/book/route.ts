@@ -11,11 +11,34 @@ import {
   SlotTakenError,
   insertBooking,
   logBookingEvent,
+  recordWebsiteEvent,
   updateBooking,
 } from '@/lib/supabase';
 import { TIMEZONE, localToUtc } from '@/lib/time';
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * visitor_id / session_id land in uuid columns. Anything that is not a uuid
+ * is discarded rather than passed through — one malformed value from a stale
+ * cookie would otherwise fail the whole insert and lose the booking.
+ */
+function asUuid(value: unknown): string | null {
+  const s = typeof value === 'string' ? value.trim() : '';
+  return UUID_RE.test(s) ? s.toLowerCase() : null;
+}
+
+function asUtm(value: unknown): Record<string, string> {
+  if (!value || typeof value !== 'object') return {};
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (/^utm_[a-z]+$/.test(k) && typeof v === 'string' && v) {
+      out[k] = v.slice(0, 200);
+    }
+  }
+  return out;
+}
 
 function generateBookingRef(): string {
   return `AH-${Date.now().toString(36).toUpperCase()}-${Math.random()
@@ -44,6 +67,14 @@ export async function POST(req: NextRequest) {
   const challenges = asStringArray(payload.challenges);
   const date = String(payload.date ?? '').trim();
   const time = String(payload.time ?? '').trim();
+
+  // Website analytics identity — absent for anyone who deep-links straight to
+  // /book, which is fine: booking_attribution falls back to matching on email.
+  const visitorId = asUuid(payload.visitorId);
+  const sessionId = asUuid(payload.sessionId);
+  const sourcePath = String(payload.sourcePath ?? '').trim().slice(0, 500) || null;
+  const referrer = String(payload.referrer ?? '').trim().slice(0, 1000) || null;
+  const utm = asUtm(payload.utm);
 
   /* ── Validation ───────────────────────────────────────────────────────── */
   if (!clientName) return NextResponse.json({ error: 'Your name is required' }, { status: 400 });
@@ -101,6 +132,11 @@ export async function POST(req: NextRequest) {
       duration_minutes: DURATION_MINUTES,
       source: 'web',
       user_agent: req.headers.get('user-agent'),
+      visitor_id: visitorId,
+      session_id: sessionId,
+      source_path: sourcePath,
+      referrer,
+      utm,
     });
 
     if (row) {
@@ -292,6 +328,23 @@ export async function POST(req: NextRequest) {
   if (!practitionerMail.ok) {
     console.error(`[booking ${bookingRef}] practitioner email failed: ${practitionerMail.error}`);
   }
+
+  // Put the booking into the website's own event stream so the funnel reads
+  // end to end in one table. Best-effort by design.
+  await recordWebsiteEvent({
+    visitorId,
+    sessionId,
+    eventName: 'booking_completed',
+    path: '/book',
+    data: {
+      booking_ref: bookingRef,
+      role,
+      challenges,
+      slot_date: date,
+      slot_time: time,
+      matched_visitor: Boolean(visitorId),
+    },
+  });
 
   // Mail is best-effort: Google has already emailed the calendar invite, and
   // the confirmation page shows the Meet link, so the client is never stranded.

@@ -1,6 +1,7 @@
 'use client'
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { useRouter } from 'next/navigation'
+import { getVisitorContext, type VisitorContext } from '@/lib/visitor'
 
 /* ─── Data ─────────────────────────────────────────────────────────────────── */
 interface BookingState {
@@ -150,6 +151,14 @@ export default function BookPage() {
   const [availableSlots, setAvailableSlots] = useState<{label: string; value: string}[]>([])
   const [isLoadingSlots, setIsLoadingSlots] = useState(false)
 
+  // Resolved once on mount: the site's visitor/session id, so this booking can
+  // be joined to website_events and website_leads. Read in an effect because
+  // it touches cookies and localStorage, which do not exist during SSR.
+  const visitor = useRef<VisitorContext>({
+    visitorId: null, sessionId: null, sourcePath: null, referrer: null, utm: {},
+  })
+  useEffect(() => { visitor.current = getVisitorContext() }, [])
+
   const set = useCallback((u: Partial<BookingState>) => setState(p => ({ ...p, ...u })), [])
   const toggleC = useCallback((c: string) => setState(p => ({
     ...p, challenges: p.challenges.includes(c) ? p.challenges.filter(x=>x!==c) : [...p.challenges, c]
@@ -179,7 +188,16 @@ export default function BookPage() {
     try {
       const res = await fetch('/api/book', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ clientName: state.name, clientEmail: state.email, clientPhone: state.phone, goal: state.role, challenges: state.challenges, date: state.date, time: state.time }),
+        body: JSON.stringify({
+          clientName: state.name, clientEmail: state.email, clientPhone: state.phone,
+          goal: state.role, challenges: state.challenges,
+          date: state.date, time: state.time,
+          visitorId: visitor.current.visitorId,
+          sessionId: visitor.current.sessionId,
+          sourcePath: visitor.current.sourcePath,
+          referrer: visitor.current.referrer,
+          utm: visitor.current.utm,
+        }),
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || 'Booking failed')

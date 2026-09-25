@@ -60,6 +60,16 @@ create table if not exists public.bookings (
   user_agent                 text,
   ip_hash                    text,
 
+  -- website analytics link. visitor_id is the uuid the site's tracker already
+  -- stamps on website_events / website_leads; it is what ties a booking back
+  -- to the person who browsed. See migrations/001_link_website_analytics.sql
+  -- for the views built on top of these.
+  visitor_id                 uuid,
+  session_id                 uuid,
+  source_path                text,
+  referrer                   text,
+  utm                        jsonb not null default '{}'::jsonb,
+
   created_at                 timestamptz not null default now(),
   updated_at                 timestamptz not null default now()
 );
@@ -69,6 +79,7 @@ create index if not exists bookings_created_at_idx   on public.bookings (created
 create index if not exists bookings_status_idx       on public.bookings (status);
 create index if not exists bookings_client_email_idx on public.bookings (lower(client_email));
 create index if not exists bookings_answers_gin      on public.bookings using gin (answers);
+create index if not exists bookings_visitor_id_idx    on public.bookings (visitor_id);
 
 -- Stops the same slot being double-booked by two concurrent requests.
 -- Cancelled/failed rows are excluded so a freed slot can be rebooked.

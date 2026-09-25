@@ -67,6 +67,14 @@ Both recovery modes take `--dry-run` and `--csv`.
 | `GET /api/admin/health` | Live check of Supabase, Google (incl. granted scopes) and mail — run after every deploy |
 | `GET /api/admin/bookings` | JSON list of bookings |
 
+## Website attribution
+
+Bookings carry the site's `visitor_id`, so they join to your existing
+`website_events` and `website_leads` tables. Views: `visitor_journey`,
+`booking_attribution`, `funnel_30d`. Setup and query cookbook in
+**[ANALYTICS.md](ANALYTICS.md)** — read the domain-split section, it is the
+part that silently produces empty attribution if skipped.
+
 ## Where the answers live
 
 `public.bookings` holds one row per booking: the client's details, `role` and
