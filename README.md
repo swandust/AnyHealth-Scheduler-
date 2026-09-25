@@ -32,6 +32,9 @@ fallback: set `MAIL_TRANSPORT=smtp`.
 
 Previously Microsoft Graph/Outlook + Zoom; both have been removed.
 
+> Picking this up in a new session? Read **[HANDOFF.md](HANDOFF.md)** first —
+> current state, what's left to configure, and the traps worth knowing.
+
 ## Getting started
 
 ```bash
