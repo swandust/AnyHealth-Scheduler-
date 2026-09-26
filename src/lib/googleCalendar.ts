@@ -100,14 +100,26 @@ export async function createMeetEvent(params: {
     .filter(Boolean)
     .join('\n');
 
+  // Also invite the team inbox (contact@anyhealth.asia) so a calendar invite
+  // lands there for every booking, independent of the Gmail account. Google
+  // emails each attendee directly because sendUpdates is 'all'.
+  const teamInvite = process.env.TEAM_INVITE_EMAIL ?? process.env.NOTIFY_EMAIL ?? process.env.FROM_EMAIL;
+  const attendees: Array<{ email: string; displayName?: string }> = [
+    { email: params.clientEmail, displayName: params.clientName },
+  ];
+  if (teamInvite && teamInvite.toLowerCase() !== params.clientEmail.toLowerCase()) {
+    attendees.push({ email: teamInvite, displayName: 'AnyHealth' });
+  }
+
   const body = {
     summary: `AnyHealth Consultation – ${params.clientName}`,
     description,
     start: { dateTime: params.startLocal, timeZone: TIMEZONE },
     end: { dateTime: params.endLocal, timeZone: TIMEZONE },
-    attendees: [{ email: params.clientEmail, displayName: params.clientName }],
+    attendees,
     guestsCanModify: false,
     guestsCanInviteOthers: false,
+    guestsCanSeeOtherGuests: false,
     reminders: {
       useDefault: false,
       overrides: [
