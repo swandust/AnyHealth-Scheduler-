@@ -23,6 +23,8 @@ interface Booking {
   client_email_status: string
   practitioner_email_status: string
   source: string
+  risk_score: number
+  risk_flags: string[] | null
   visitor_id: string | null
   source_path: string | null
   utm: Record<string, string> | null
@@ -208,6 +210,7 @@ export default function AdminPage() {
               <th style={head}>Client mail</th>
               <th style={head}>Our mail</th>
               <th style={head}>Meet</th>
+              <th style={head}>Risk</th>
               <th style={head}>Came from</th>
               <th style={head}>Ref</th>
             </tr>
@@ -237,6 +240,23 @@ export default function AdminPage() {
                     ? <a href={b.meet_url} target="_blank" rel="noreferrer" style={{ color: 'var(--primary)' }}>Join</a>
                     : '—'}
                 </td>
+                <td style={{ ...cell, fontSize: 12, maxWidth: 160 }}>
+                  {b.risk_score > 0 ? (
+                    <>
+                      <span style={{
+                        display: 'inline-block', borderRadius: 999, padding: '2px 10px',
+                        fontSize: 12, fontWeight: 700,
+                        background: b.risk_score >= 50 ? '#fde8e6' : '#fff4e0',
+                        color: b.risk_score >= 50 ? '#8c1d18' : '#7a4b00',
+                      }}>{b.risk_score}</span>
+                      {b.risk_flags?.length ? (
+                        <div style={{ color: 'var(--on-surface-variant)', marginTop: 4 }}>
+                          {b.risk_flags.join(', ')}
+                        </div>
+                      ) : null}
+                    </>
+                  ) : <span style={{ color: 'var(--on-surface-variant)' }}>—</span>}
+                </td>
                 <td style={{ ...cell, fontSize: 12, maxWidth: 180 }}>
                   {b.visitor_id
                     ? <span title={b.visitor_id} style={{ color: 'var(--primary)', fontWeight: 600 }}>known visitor</span>
@@ -252,7 +272,7 @@ export default function AdminPage() {
             ))}
             {!loading && bookings.length === 0 && (
               <tr>
-                <td colSpan={11} style={{ ...cell, textAlign: 'center', padding: 48, color: 'var(--on-surface-variant)' }}>
+                <td colSpan={12} style={{ ...cell, textAlign: 'center', padding: 48, color: 'var(--on-surface-variant)' }}>
                   No bookings yet.
                 </td>
               </tr>

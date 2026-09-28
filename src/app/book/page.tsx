@@ -159,6 +159,66 @@ export default function BookPage() {
   })
   useEffect(() => { visitor.current = getVisitorContext() }, [])
 
+  // Signed token proving the form was really loaded. A script posting straight
+  // at /api/book has none and cannot mint one.
+  const challengeToken = useRef<string | null>(null)
+  useEffect(() => {
+    fetch('/api/book/challenge')
+      .then(r => r.json())
+      .then(d => { challengeToken.current = d.token ?? null })
+      .catch(() => { /* the server still scores a missing token */ })
+  }, [])
+
+  // Honeypot. Hidden from people, irresistible to form-filling bots.
+  const [companyWebsite, setCompanyWebsite] = useState('')
+
+  // Email reachability gate for step 4.
+  type EmailState = {
+    checking: boolean
+    checked: string          // the address the verdict belongs to
+    valid: boolean
+    message?: string
+    suggestion?: string
+    needsConfirm: boolean
+    confirmed: boolean
+  }
+  const [emailState, setEmailState] = useState<EmailState>({
+    checking: false, checked: '', valid: false, needsConfirm: false, confirmed: false,
+  })
+
+  const verifyEmail = useCallback(async (email: string) => {
+    const trimmed = email.trim()
+    if (!trimmed) return
+    setEmailState(p => ({ ...p, checking: true }))
+    try {
+      const res = await fetch('/api/verify-email', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: trimmed }),
+      })
+      const d = await res.json()
+      setEmailState({
+        checking: false,
+        checked: trimmed,
+        valid: Boolean(d.valid),
+        message: d.message,
+        suggestion: d.suggestion,
+        needsConfirm: Boolean(d.requiresConfirmation),
+        confirmed: false,
+      })
+    } catch {
+      // Never strand someone because the check itself failed.
+      setEmailState({
+        checking: false, checked: trimmed, valid: true,
+        needsConfirm: false, confirmed: false,
+      })
+    }
+  }, [])
+
+  const emailOk =
+    emailState.checked === state.email.trim() &&
+    emailState.valid &&
+    (!emailState.needsConfirm || emailState.confirmed)
+
   const set = useCallback((u: Partial<BookingState>) => setState(p => ({ ...p, ...u })), [])
   const toggleC = useCallback((c: string) => setState(p => ({
     ...p, challenges: p.challenges.includes(c) ? p.challenges.filter(x=>x!==c) : [...p.challenges, c]
@@ -197,6 +257,8 @@ export default function BookPage() {
           sourcePath: visitor.current.sourcePath,
           referrer: visitor.current.referrer,
           utm: visitor.current.utm,
+          challengeToken: challengeToken.current,
+          company_website: companyWebsite,   // honeypot: must stay empty
         }),
       })
       const data = await res.json()
@@ -460,22 +522,101 @@ export default function BookPage() {
                     </div>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 24, paddingBottom: 16 }}>
                       {[
-                        { id: 'name', label: 'Full Name *', type: 'text', placeholder: 'John Doe', required: true },
-                        { id: 'email', label: 'Email Address *', type: 'email', placeholder: 'john@example.com', required: true },
-                        { id: 'phone', label: 'Phone Number (Optional)', type: 'tel', placeholder: '+60 12 345 6789', required: false },
+                        { id: 'name', label: 'Full Name *', type: 'text', placeholder: 'John Doe' },
+                        { id: 'email', label: 'Email Address *', type: 'email', placeholder: 'john@example.com' },
+                        { id: 'phone', label: 'Phone Number (Optional)', type: 'tel', placeholder: '+60 12 345 6789' },
                       ].map(f => (
                         <div key={f.id}>
                           <label style={{ display: 'block', fontFamily: 'IBM Plex Sans', fontSize: 11, fontWeight: 600, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--on-surface-variant)', marginBottom: 8, marginLeft: 4 }}>{f.label}</label>
                           <input className="form-input" id={f.id} type={f.type} placeholder={f.placeholder}
                             value={state[f.id as keyof BookingState] as string}
-                            onChange={e => set({ [f.id]: e.target.value })} />
+                            onChange={e => {
+                              set({ [f.id]: e.target.value })
+                              if (f.id === 'email') {
+                                // Editing invalidates any previous verdict.
+                                setEmailState(p => ({ ...p, checked: '', needsConfirm: false, confirmed: false, message: undefined, suggestion: undefined }))
+                              }
+                            }}
+                            onBlur={f.id === 'email' ? e => verifyEmail(e.target.value) : undefined} />
+
+                          {f.id === 'email' && emailState.checking && (
+                            <p style={{ fontFamily: 'Manrope', fontSize: 12, color: 'var(--on-surface-variant)', marginTop: 6, marginLeft: 4 }}>
+                              Checking that this address can receive email…
+                            </p>
+                          )}
+
+                          {/* Hard stop: the domain cannot receive mail at all. */}
+                          {f.id === 'email' && !emailState.checking && emailState.checked === state.email.trim() && !emailState.valid && (
+                            <p style={{ fontFamily: 'Manrope', fontSize: 12, color: '#b3261e', marginTop: 6, marginLeft: 4 }}>
+                              {emailState.message ?? 'Please use a valid email address.'}
+                              {emailState.suggestion && (
+                                <> {' '}
+                                  <button type="button"
+                                    onClick={() => { set({ email: emailState.suggestion! }); verifyEmail(emailState.suggestion!) }}
+                                    style={{ background: 'none', border: 'none', padding: 0, color: 'var(--primary)', fontWeight: 700, cursor: 'pointer', fontSize: 12, textDecoration: 'underline' }}>
+                                    Use {emailState.suggestion}
+                                  </button>
+                                </>
+                              )}
+                            </p>
+                          )}
+
+                          {/* Soft stop: resolves, but looks like a typo. gmail.co and
+                              hotmial.com are real registered domains with working mail,
+                              so this needs a human decision, not a silent pass. */}
+                          {f.id === 'email' && !emailState.checking && emailState.checked === state.email.trim()
+                            && emailState.valid && emailState.needsConfirm && !emailState.confirmed && (
+                            <div style={{ marginTop: 8, marginLeft: 4, padding: 12, borderRadius: 10, background: 'rgba(255,193,7,0.12)', border: '1px solid rgba(255,193,7,0.4)' }}>
+                              <p style={{ fontFamily: 'Manrope', fontSize: 12, color: 'var(--on-surface)', marginBottom: 8 }}>
+                                Did you mean <strong>{emailState.suggestion}</strong>?
+                              </p>
+                              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                                <button type="button"
+                                  onClick={() => { set({ email: emailState.suggestion! }); verifyEmail(emailState.suggestion!) }}
+                                  style={{ background: 'var(--primary)', color: 'var(--on-primary)', border: 'none', borderRadius: 8, padding: '6px 12px', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
+                                  Yes, use that
+                                </button>
+                                <button type="button"
+                                  onClick={() => setEmailState(p => ({ ...p, confirmed: true }))}
+                                  style={{ background: 'transparent', color: 'var(--on-surface-variant)', border: '1px solid var(--outline-variant)', borderRadius: 8, padding: '6px 12px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>
+                                  No, mine is correct
+                                </button>
+                              </div>
+                            </div>
+                          )}
+
+                          {f.id === 'email' && emailOk && !emailState.needsConfirm && (
+                            <p style={{ fontFamily: 'Manrope', fontSize: 12, color: 'var(--primary)', marginTop: 6, marginLeft: 4 }}>
+                              Looks good.
+                            </p>
+                          )}
                         </div>
                       ))}
+
+                      {/* Honeypot. Hidden from people and from screen readers;
+                          bots fill every field they find. */}
+                      <div aria-hidden="true" style={{ position: 'absolute', left: '-9999px', width: 1, height: 1, overflow: 'hidden' }}>
+                        <label htmlFor="company_website">Company website</label>
+                        <input id="company_website" name="company_website" type="text" tabIndex={-1}
+                          autoComplete="off" value={companyWebsite}
+                          onChange={e => setCompanyWebsite(e.target.value)} />
+                      </div>
                     </div>
                   </div>
                   <div style={navBar}>
                     <button className="btn-ghost" onClick={() => setStep(3)}><span className="material-symbols-outlined" style={{ fontSize: 14 }}>arrow_back</span> Back</button>
-                    <button className="btn-p" onClick={() => state.name && state.email && setStep(5)} disabled={!state.name || !state.email}>
+                    <button className="btn-p"
+                      onClick={async () => {
+                        if (!state.name || !state.email) return
+                        // Verify on click too: they may never have blurred the field.
+                        if (emailState.checked !== state.email.trim()) {
+                          await verifyEmail(state.email)
+                          return
+                        }
+                        if (emailOk) setStep(5)
+                      }}
+                      disabled={!state.name || !state.email || emailState.checking
+                        || (emailState.checked === state.email.trim() && !emailOk)}>
                       Next <span className="material-symbols-outlined" style={{ fontSize: 16 }}>arrow_forward</span>
                     </button>
                   </div>

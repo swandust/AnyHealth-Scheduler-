@@ -76,6 +76,9 @@ export interface BookingRow {
   email_error: string | null;
   source: string;
   user_agent: string | null;
+  ip_hash: string | null;
+  risk_score: number;
+  risk_flags: string[];
   visitor_id: string | null;
   session_id: string | null;
   source_path: string | null;
@@ -103,6 +106,9 @@ export interface NewBooking {
   duration_minutes?: number;
   source?: string;
   user_agent?: string | null;
+  ip_hash?: string | null;
+  risk_score?: number;
+  risk_flags?: string[];
   visitor_id?: string | null;
   session_id?: string | null;
   source_path?: string | null;

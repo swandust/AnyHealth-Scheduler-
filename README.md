@@ -78,6 +78,12 @@ Bookings carry the site's `visitor_id`, so they join to your existing
 **[ANALYTICS.md](ANALYTICS.md)** — read the domain-split section, it is the
 part that silently produces empty attribution if skipped.
 
+## Bot controls
+
+Honeypot, signed challenge token, MX-backed email checks, Postgres rate
+limiting and a manual blocklist. Four things hard-block; everything else is
+scored onto the booking and shown in `/admin`. See **[ANTI-ABUSE.md](ANTI-ABUSE.md)**.
+
 ## Where the answers live
 
 `public.bookings` holds one row per booking: the client's details, `role` and

@@ -15,6 +15,15 @@ import {
   updateBooking,
 } from '@/lib/supabase';
 import { TIMEZONE, localToUtc } from '@/lib/time';
+import { checkEmail } from '@/lib/emailVerify';
+import { checkBlocklist, checkRateLimit, logAbuseEvent } from '@/lib/abuseGuard';
+import {
+  assessRisk,
+  clientIp,
+  hashIp,
+  honeypotTripped,
+  verifyChallenge,
+} from '@/lib/security';
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -85,6 +94,86 @@ export async function POST(req: NextRequest) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^\d{2}:\d{2}$/.test(time))
     return NextResponse.json({ error: 'Please pick a date and time' }, { status: 400 });
 
+  /* ── Bot / abuse guards ───────────────────────────────────────────────── */
+  const ipHash = hashIp(clientIp(req.headers));
+  const userAgent = req.headers.get('user-agent');
+
+  // 1. Honeypot. A hidden field that only a script fills in. Answer 200 with a
+  //    plausible-looking body: telling a bot exactly why it failed just helps
+  //    it try again.
+  if (honeypotTripped(payload)) {
+    await logAbuseEvent({
+      ipHash, email: clientEmail, kind: 'blocked', reason: 'honeypot', userAgent,
+    });
+    return NextResponse.json(
+      { success: true, bookingRef: `AH-${Date.now().toString(36).toUpperCase()}` },
+      { status: 200 }
+    );
+  }
+
+  // 2. Blocklist.
+  const blocked = await checkBlocklist({ email: clientEmail, ipHash });
+  if (!blocked.allowed) {
+    await logAbuseEvent({
+      ipHash, email: clientEmail, kind: 'blocked', reason: blocked.reason, userAgent,
+    });
+    return NextResponse.json(
+      { error: 'We could not complete this booking. Please contact contact@anyhealth.asia.' },
+      { status: 403 }
+    );
+  }
+
+  // 3. Rate limit.
+  const withinLimit = await checkRateLimit({ ipHash, email: clientEmail });
+  if (!withinLimit.allowed) {
+    await logAbuseEvent({
+      ipHash, email: clientEmail, kind: 'blocked', reason: withinLimit.reason, userAgent,
+    });
+    return NextResponse.json(
+      { error: 'Too many booking attempts. Please try again later, or email contact@anyhealth.asia.' },
+      { status: 429 }
+    );
+  }
+
+  // 4. Email reachability. Same check the wizard runs, repeated here because
+  //    the client-side gate is a convenience, not a control.
+  const emailCheck = await checkEmail(clientEmail);
+  if (!emailCheck.valid) {
+    await logAbuseEvent({
+      ipHash, email: clientEmail, kind: 'blocked',
+      reason: `email_${emailCheck.verdict}`, userAgent,
+    });
+    return NextResponse.json(
+      { error: emailCheck.message ?? 'Please use a valid email address.' },
+      { status: 400 }
+    );
+  }
+
+  // 5. Challenge token — proves the form was actually loaded, and gives a
+  //    signed dwell time that a payload field could not fake.
+  const challenge = verifyChallenge(payload.challengeToken);
+  const dwellMs = challenge.ok ? challenge.dwellMs : null;
+  const challengeReason = challenge.ok ? undefined : challenge.reason;
+
+  // 6. Everything else is scored, never blocked.
+  const risk = assessRisk({
+    dwellMs,
+    emailFlags: emailCheck.flags,
+    hasVisitorId: Boolean(asUuid(payload.visitorId)),
+    hasReferrer: Boolean(payload.referrer),
+    userAgent,
+    challengeReason,
+  });
+
+  await logAbuseEvent({
+    ipHash,
+    email: clientEmail,
+    kind: risk.score > 0 ? 'flagged' : 'attempt',
+    reason: risk.flags.join(',') || undefined,
+    detail: { risk_score: risk.score },
+    userAgent,
+  });
+
   /* ── Is the slot still bookable? ──────────────────────────────────────── */
   const slot = await findSlot(date, time);
   if (!slot) {
@@ -131,7 +220,10 @@ export async function POST(req: NextRequest) {
       timezone: TIMEZONE,
       duration_minutes: DURATION_MINUTES,
       source: 'web',
-      user_agent: req.headers.get('user-agent'),
+      user_agent: userAgent,
+      ip_hash: ipHash,
+      risk_score: risk.score,
+      risk_flags: risk.flags,
       visitor_id: visitorId,
       session_id: sessionId,
       source_path: sourcePath,

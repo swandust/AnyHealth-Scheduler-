@@ -98,8 +98,14 @@ instead of three. SMTP (Zoho/ZeptoMail) still works as a fallback via
 | `src/lib/time.ts` | All timezone maths — see gotcha #4 |
 | `src/lib/ics.ts` | RFC 5545 generator |
 | `src/lib/visitor.ts` | Website visitor identity resolution |
+| `src/lib/emailVerify.ts` | Syntax / MX / disposable / typo checks |
+| `src/lib/security.ts` | Honeypot, challenge token, IP hashing, risk scoring |
+| `src/lib/abuseGuard.ts` | Blocklist + rate limit (both in Postgres) |
 | `supabase/schema.sql` | Run first |
 | `supabase/migrations/001_link_website_analytics.sql` | Run second |
+| `supabase/migrations/002_abuse_controls.sql` | Run third |
+| `supabase/queries/triage-booking.sql` | Is a booking real or junk? |
+| `ANTI-ABUSE.md` | Bot controls, what blocks vs what is only scored |
 | `SETUP.md` | Click-by-click account setup |
 | `ANALYTICS.md` | Attribution setup + query cookbook |
 
@@ -228,7 +234,14 @@ branch or merge the PR first.
 That's why availability degrades *open* when Google is unreachable — the DB is
 the real guard.
 
-**8. Recovering the lost history.** `npm run recover -- --zoom` pulls past
+**8. Missing `visitor_id` is NOT evidence of a bot.** A booking with
+`visitor_id: null` but a real `referrer` is almost always gotcha #3 — the
+cross-domain gap — not fraud. Check `role`, `challenges`, `user_agent` and
+`answers` on the `bookings` row before concluding anything;
+`booking_attribution` does not select them. Use
+`supabase/queries/triage-booking.sql`.
+
+**9. Recovering the lost history.** `npm run recover -- --zoom` pulls past
 meetings from the old Zoom account (gives name + date/time; Zoom never stored
 email). `npm run recover -- --ics <file>` reads an exported Outlook calendar and
 is the *richer* source — those event bodies held name, email, goal and
@@ -239,7 +252,10 @@ are closed.
 
 ## 9. Sensible next work (only after green)
 
-- Rate limiting on `POST /api/book` (`@upstash/ratelimit`) — currently none.
+- Cloudflare Turnstile at `/api/book`, if scripted abuse ever gets past the
+  honeypot + challenge token. Not needed pre-emptively.
+- Emailed verification code (the only true proof of inbox control). Pieces are
+  in place; deliberately not built because of the funnel friction.
 - Reschedule/cancel flow. `deleteEvent()` exists in `googleCalendar.ts` and is
   unused; `bookings.status` already has a `cancelled` value.
 - Automated tests. Verification so far was ad-hoc scripts, not a suite.
