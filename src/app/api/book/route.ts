@@ -15,6 +15,7 @@ import {
   updateBooking,
 } from '@/lib/supabase';
 import { TIMEZONE, localToUtc } from '@/lib/time';
+import {validBookingDate} from '@/lib/serverConfig';
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -59,6 +60,9 @@ export async function POST(req: NextRequest) {
   } catch {
     return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
   }
+  if (!payload || Array.isArray(payload) || typeof payload !== 'object') {
+    return NextResponse.json({error:'Invalid booking details'}, {status:400});
+  }
 
   const clientName = String(payload.clientName ?? '').trim();
   const clientEmail = String(payload.clientEmail ?? '').trim();
@@ -82,11 +86,13 @@ export async function POST(req: NextRequest) {
   if (!EMAIL_RE.test(clientEmail))
     return NextResponse.json({ error: 'That email address does not look right' }, { status: 400 });
   if (!role) return NextResponse.json({ error: 'Please tell us your role' }, { status: 400 });
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^\d{2}:\d{2}$/.test(time))
+  if (!validBookingDate(date) || !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(time))
     return NextResponse.json({ error: 'Please pick a date and time' }, { status: 400 });
 
   /* ── Is the slot still bookable? ──────────────────────────────────────── */
-  const slot = await findSlot(date, time);
+  let slot;
+  try { slot = await findSlot(date, time); }
+  catch { return NextResponse.json({error:'Availability could not be checked. Please try again.'},{status:503}); }
   if (!slot) {
     return NextResponse.json(
       { error: 'That time is no longer available. Please choose another slot.' },
@@ -161,10 +167,8 @@ export async function POST(req: NextRequest) {
   });
 
   if (!persisted) {
-    console.error(
-      `[booking ${bookingRef}] NOT SAVED to Supabase: ${persistenceError}. ` +
-        `Payload: ${JSON.stringify(payload)}`
-    );
+    console.error(`[booking ${bookingRef}] NOT SAVED to Supabase: ${persistenceError}`);
+    return NextResponse.json({error:'We could not save your booking. No meeting was created. Please try again or email contact@anyhealth.asia.'},{status:503});
   }
 
   /* ── 2. Google Calendar event + Meet link ─────────────────────────────── */

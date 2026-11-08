@@ -1,5 +1,6 @@
 import { getBusyIntervals, isGoogleConfigured } from './googleCalendar';
 import { getBookedSlotStarts } from './supabase';
+import {validBookingDate} from './serverConfig';
 import {
   TIMEZONE,
   addMinutesLocal,
@@ -65,12 +66,16 @@ function generateSlots(dateStr: string): TimeSlot[] {
  *   2. Supabase bookings — so a booking still mid-flight blocks the slot even
  *      if Google has not caught up yet.
  *
- * If a source errors the slot list is NOT emptied; Supabase's unique index on
- * `start_utc` is the real guard against double-booking, so degrading open is
- * safe here and stops an outage at Google from killing the funnel.
+ * Both sources must succeed. An outage is reported as unavailable, rather than
+ * treating failed calendar or reservation reads as an empty schedule.
  */
 export async function getSlotsForDate(dateStr: string): Promise<TimeSlot[]> {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return [];
+  if (!validBookingDate(dateStr)) return [];
+  if (!Number.isInteger(DURATION_MINUTES) || DURATION_MINUTES < 5 || DURATION_MINUTES > 240 ||
+      !Number.isFinite(MIN_NOTICE_MINUTES) || MIN_NOTICE_MINUTES < 0) {
+    throw new Error('Invalid scheduler slot duration or notice configuration.');
+  }
+  if (!isGoogleConfigured()) throw new Error('Scheduler calendar credentials are missing.');
 
   const availableDays = (process.env.AVAILABLE_DAYS ?? '1,2,3,4,5,6')
     .split(',')
@@ -112,7 +117,7 @@ export async function getSlotsForDate(dateStr: string): Promise<TimeSlot[]> {
       });
     } catch (err) {
       console.error('[availability] Google free/busy lookup failed:', err);
-      // Degrade open — see the note on this function.
+      throw new Error('Scheduler calendar availability could not be checked.');
     }
   }
 
@@ -128,6 +133,7 @@ export async function getSlotsForDate(dateStr: string): Promise<TimeSlot[]> {
     }
   } catch (err) {
     console.error('[availability] Supabase booked-slot lookup failed:', err);
+    throw new Error('Scheduler reservations could not be checked.');
   }
 
   return slots;

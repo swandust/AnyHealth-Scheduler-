@@ -1,4 +1,5 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import {schedulerDatabaseSettings} from './serverConfig';
 
 /**
  * Server-side Supabase client.
@@ -6,27 +7,17 @@ import { createClient, type SupabaseClient } from '@supabase/supabase-js';
  * Uses the SERVICE ROLE key, so it bypasses RLS — it must never be imported
  * into a Client Component. Every caller in this app is a Route Handler.
  *
- * If the env vars are missing the client is `null` and every helper below
- * degrades to a no-op that logs loudly, so a mis-configured deploy still takes
- * bookings instead of 500-ing. Check `/api/admin/health` to see the current state.
+ * Missing or mismatched project credentials stop booking before external writes.
+ * Check `/api/admin/health` for authenticated configuration diagnostics.
  */
 
-let _client: SupabaseClient | null | undefined;
+let _client: SupabaseClient | undefined;
 
-export function getSupabase(): SupabaseClient | null {
+export function getSupabase(): SupabaseClient {
+  const settings = schedulerDatabaseSettings();
   if (_client !== undefined) return _client;
 
-  const url = process.env.SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-  if (!url || !key) {
-    console.error(
-      '[supabase] SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY are not set — ' +
-        'bookings will NOT be persisted. Fix this before going live.'
-    );
-    _client = null;
-    return null;
-  }
+  const {url,key} = settings;
 
   _client = createClient(url, key, {
     auth: { persistSession: false, autoRefreshToken: false },
@@ -127,8 +118,7 @@ export class SlotTakenError extends Error {
  * important line in the app: whatever the calendar and mail calls do next, the
  * answers are already safe.
  *
- * Returns `null` (rather than throwing) when Supabase is unreachable, so a
- * database outage cannot stop a customer booking a call.
+ * Returns null on rejected inserts; the handler must stop before calendar/mail.
  * Throws `SlotTakenError` if the slot was taken in the meantime.
  */
 export async function insertBooking(booking: NewBooking): Promise<BookingRow | null> {
@@ -246,7 +236,7 @@ export async function getBookedSlotStarts(
 
   if (error) {
     console.error('[supabase] getBookedSlotStarts failed:', error.message);
-    return [];
+    throw new Error('Scheduler reservation lookup failed.');
   }
 
   return (data ?? []).map((r: { start_utc: string }) => new Date(r.start_utc).toISOString());
